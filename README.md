@@ -99,8 +99,8 @@ export DEVIN_ORG_ID_MAX2='org-for-max2'
 * The suffix in lower case is the account name: these are `work` and `max2`. It
   is the name you say to Claude, so pick one you will recognise. Letters, digits
   and underscores work, so `DEVIN_API_KEY_1` with `DEVIN_ORG_ID_1` is account `1`.
-* Both variables of a pair must be set. One without the other is an error that
-  names the missing variable.
+* Both variables of a pair must be set and not empty. Otherwise the bridge stops
+  with an error that names the variable.
 * The unsuffixed pair (`DEVIN_API_KEY`, `DEVIN_ORG_ID`) can sit beside them as
   the account `default`.
 
@@ -117,7 +117,9 @@ Check each key the same way, with its own variable name in the `curl` command.
 * `[accounts.<name>]` supports `org_id`, `api_key_env` (preferred) or `api_key`,
   and optional `base_url`. If `api_key_env` is set, it takes precedence and must
   be present and nonempty. File accounts and environment pairs are used
-  together; the same name in both is an error.
+  together; the same name in both is an error. One exception: if a file account
+  names `DEVIN_API_KEY_<NAME>` as its `api_key_env`, that variable belongs to the
+  file account, and a `DEVIN_ORG_ID_<NAME>` beside it is ignored.
 * Never commit real keys; restrict the config with `chmod 600` if it contains
   literal keys. `base_url` receives the bearer key: only use trusted URLs.
 

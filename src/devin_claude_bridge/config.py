@@ -53,13 +53,15 @@ def env_accounts(file_key_envs=()) -> dict[str, dict]:
     """Accounts named by environment pairs: DEVIN_API_KEY_<NAME> with DEVIN_ORG_ID_<NAME>.
 
     The suffix, in lower case, is the account name. A key variable that the config
-    file already names in `api_key_env` belongs to that file account and is skipped.
+    file already names in `api_key_env` belongs to that file account: that exact
+    suffix is skipped, key and organization ID both.
     """
+    owned = {v[len(KEY_PREFIX) :] for v in file_key_envs if v and v.startswith(KEY_PREFIX)}
     suffixes = {}
     for variable in os.environ:
         for prefix in (KEY_PREFIX, ORG_PREFIX):
             suffix = variable[len(prefix) :]
-            if variable.startswith(prefix) and suffix:
+            if variable.startswith(prefix) and suffix and suffix not in owned:
                 suffixes.setdefault(suffix.lower(), set()).add(suffix)
     entries = {}
     for name, spellings in sorted(suffixes.items()):
@@ -68,15 +70,16 @@ def env_accounts(file_key_envs=()) -> dict[str, dict]:
             raise ValueError(f"Account {name}: use one spelling of the suffix, found {found}")
         suffix = spellings.pop()
         key_env, org_env = KEY_PREFIX + suffix, ORG_PREFIX + suffix
-        if key_env in file_key_envs:
-            continue
         if not re.fullmatch(r"[A-Za-z0-9_]+", suffix):
             raise ValueError(f"Account suffix {suffix!r}: use letters, digits and underscores")
-        for present, missing in ((key_env, org_env), (org_env, key_env)):
-            if os.getenv(present) and not os.getenv(missing):
-                raise ValueError(f"Account {name}: {present} is set but {missing} is not")
-        if os.getenv(key_env):
-            entries[name] = {"org_id": os.environ[org_env], "api_key_env": key_env}
+        unset = [v for v in (key_env, org_env) if not os.getenv(v)]
+        if len(unset) == 2:
+            raise ValueError(f"Account {name}: {key_env} and {org_env} are empty")
+        if unset:
+            present = org_env if unset[0] == key_env else key_env
+            state = "empty" if unset[0] in os.environ else "not"
+            raise ValueError(f"Account {name}: {present} is set but {unset[0]} is {state}")
+        entries[name] = {"org_id": os.environ[org_env], "api_key_env": key_env}
     return entries
 
 

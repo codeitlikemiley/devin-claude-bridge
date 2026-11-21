@@ -1,5 +1,3 @@
-import os
-
 import pytest
 
 from devin_claude_bridge.config import load_config, session_id
@@ -8,9 +6,6 @@ from devin_claude_bridge.config import load_config, session_id
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
-    for name in list(os.environ):
-        if name.startswith(("DEVIN_BRIDGE_", "DEVIN_API_KEY", "DEVIN_ORG_ID")):
-            monkeypatch.delenv(name)
 
 
 def test_env_fallback(monkeypatch):
@@ -123,6 +118,39 @@ def test_half_an_env_pair_is_an_error(monkeypatch, variable, value, error):
     monkeypatch.setenv(variable, value)
     with pytest.raises(ValueError, match=error):
         load_config()
+
+
+@pytest.mark.parametrize(
+    "key,org,error",
+    [
+        ("", None, "DEVIN_API_KEY_WORK and DEVIN_ORG_ID_WORK are empty"),
+        ("", "", "DEVIN_API_KEY_WORK and DEVIN_ORG_ID_WORK are empty"),
+        ("key", "", "DEVIN_API_KEY_WORK is set but DEVIN_ORG_ID_WORK is empty"),
+        ("", "org-x", "DEVIN_ORG_ID_WORK is set but DEVIN_API_KEY_WORK is empty"),
+    ],
+)
+def test_an_empty_env_pair_is_an_error_beside_a_good_account(monkeypatch, key, org, error):
+    pair(monkeypatch, "MAX2")
+    monkeypatch.setenv("DEVIN_API_KEY_WORK", key)
+    if org is not None:
+        monkeypatch.setenv("DEVIN_ORG_ID_WORK", org)
+    with pytest.raises(ValueError, match=error):
+        load_config()
+
+
+def test_a_key_the_file_names_does_not_clash_with_another_spelling(monkeypatch, tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[accounts.legacy]\norg_id = "org-legacy"\napi_key_env = "DEVIN_API_KEY_Work"\n'
+    )
+    monkeypatch.setenv("DEVIN_BRIDGE_CONFIG", str(path))
+    monkeypatch.setenv("DEVIN_API_KEY_Work", "legacy-key")
+    monkeypatch.setenv("DEVIN_ORG_ID_Work", "org-ignored")
+    pair(monkeypatch, "WORK", "work-key", "org-work")
+    config = load_config()
+    assert sorted(config.accounts) == ["legacy", "work"]
+    assert config.accounts["legacy"].org_id == "org-legacy"
+    assert config.accounts["work"].api_key == "work-key"
 
 
 def test_env_pair_errors(monkeypatch):
