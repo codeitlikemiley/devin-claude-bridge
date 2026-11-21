@@ -230,6 +230,19 @@ async def test_a_failed_last_read_of_an_ended_session_is_reported(bridge, org):
     assert texts(result) == ["goodbye"] and not result["timed_out"]
 
 
+async def test_a_failed_last_read_is_reported_when_nothing_was_collected(bridge, org):
+    async def ends_then_breaks(count):
+        if count == 2:
+            org.sessions["devin-task"]["is_archived"] = True
+        if count == 3:
+            raise DevinAPIError(500, "Devin API 500: try later")
+
+    org.on_read = ends_then_breaks
+    result = await wait(bridge, timeout_seconds=30)
+    assert result["ended"] == "archived" and "500" in result["error"]
+    assert result["messages"] == [] and not result["timed_out"]
+
+
 async def test_wait_errors(bridge, org):
     with pytest.raises(ValueError, match="timeout_seconds"):
         await wait(bridge, poll_seconds=0)
