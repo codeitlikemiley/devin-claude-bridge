@@ -1,6 +1,6 @@
 [accounts.max2]
 org_id = "org-replace-me"
-api_key_env = "DEVIN_MAX2_API_KEY"
+api_key_env = "DEVIN_MAX2_API_KEY" # Personal Access Token recommended for local use.
 # base_url = "https://api.devin.ai"
 
 [accounts.work]
@@ -10,5 +10,10 @@ api_key_env = "DEVIN_WORK_API_KEY"
 
 [targets.research-bot]
 account = "max2"
+bot_service_user_id = "service-user-replace-me"
+description = "Research Bot; follows the newest root conversation after recycling"
+
+[targets.pinned-session]
+account = "work"
 session_id = "devin-replace-me"
-description = "Research and investigation"
+description = "A specific session; does not follow Bot restarts"

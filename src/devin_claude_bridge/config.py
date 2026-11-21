@@ -35,7 +35,9 @@ class Config:
             if target not in self.targets:
                 raise ValueError(f"Unknown target: {target}")
             entry = self.targets[target]
-            account, session = entry["account"], entry["session_id"]
+            account, session = entry["account"], entry.get("session_id")
+            if entry.get("bot_service_user_id"):
+                return account, None
         if account not in self.accounts:
             raise ValueError(f"Unknown account: {account}")
         if not session:
@@ -73,9 +75,18 @@ def load_config() -> Config:
     for name, entry in data.get("targets", {}).items():
         if entry.get("account") not in accounts:
             raise ValueError(f"Target {name}: unknown account")
+        if bool(entry.get("session_id")) == bool(entry.get("bot_service_user_id")):
+            raise ValueError(f"Target {name}: set exactly one of session_id or bot_service_user_id")
+        bot = entry.get("bot_service_user_id")
+        if bot and not re.fullmatch(r"service-user-[A-Za-z0-9_-]+", bot):
+            raise ValueError(f"Target {name}: bot_service_user_id must start with service-user-")
         targets[name] = {
             "account": entry["account"],
-            "session_id": session_id(entry.get("session_id", "")),
+            **(
+                {"bot_service_user_id": bot}
+                if bot
+                else {"session_id": session_id(entry["session_id"])}
+            ),
             "description": entry.get("description", ""),
         }
     return Config(accounts, targets)

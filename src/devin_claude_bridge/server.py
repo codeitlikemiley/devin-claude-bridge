@@ -9,6 +9,7 @@ def create_server(bridge=None):
     server = FastMCP("devin-claude-bridge")
     for name in (
         "list_accounts",
+        "list_bots",
         "list_sessions",
         "create_session",
         "send_message",

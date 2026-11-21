@@ -57,7 +57,7 @@ async def test_read_inbox_positions_and_filtering(bridge):
     assert len(replay["messages"]) == 3
     client.messages.assert_awaited_with("devin-a", None)
     position = json.loads(bridge.state.path.read_text())["one"]["devin-a"]
-    assert position == {"cursor": "c3", "event_id": "3"}
+    assert position == {"cursor": "c3", "event_id": "3", "direct": True}
 
 
 async def test_inbox_multiple_accounts_and_error_retains_cursor(bridge):
@@ -137,6 +137,7 @@ async def test_tools_registered(bridge):
     tools = await server.list_tools()
     assert {t.name for t in tools} == {
         "list_accounts",
+        "list_bots",
         "list_sessions",
         "create_session",
         "send_message",

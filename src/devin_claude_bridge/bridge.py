@@ -1,7 +1,7 @@
 import asyncio
 import time
 
-from .client import DevinClient
+from .client import DevinAPIError, DevinClient
 from .config import session_id as normalize
 from .state import State
 
@@ -28,6 +28,68 @@ class Bridge:
         """List up to 200 sessions in an account."""
         return await self.client(account).list_sessions(limit)
 
+    async def list_bots(self, account: str):
+        """List root conversations grouped by service user, with the newest session first."""
+        sessions = await self.client(account).root_sessions()
+        bots = {}
+        for session in sorted(sessions, key=lambda s: s["created_at"], reverse=True):
+            bot = session.get("service_user_id")
+            if bot:
+                bots.setdefault(
+                    bot,
+                    {
+                        "service_user_id": bot,
+                        "session_id": normalize(session["session_id"]),
+                        "title": session.get("title"),
+                        "status": session["status"],
+                    },
+                )
+        return {"account": account, "bots": list(bots.values())}
+
+    async def _resolve(self, data, target, account, session_id, force=False):
+        account, sid = self.config.resolve(target, account, session_id)
+        entry = self.config.targets.get(target, {})
+        bot = entry.get("bot_service_user_id")
+        if not bot:
+            return account, sid
+        sessions = data.setdefault(account, {})
+        cached = next((s for s, p in sessions.items() if target in p.get("targets", [])), None)
+        if cached and not force:
+            try:
+                session = await self.client(account).get_session(cached)
+                if session["status"] not in {"exit", "error"} and not session.get("is_archived"):
+                    return account, cached
+            except DevinAPIError as exc:
+                if exc.status_code not in {404, 410}:
+                    raise
+        roots = await self.client(account).root_sessions(bot)
+        roots = [s for s in roots if s["status"] not in {"exit", "error"}]
+        if not roots:
+            raise ValueError(f"Bot target {target}: no active root conversation found")
+        sid = normalize(max(roots, key=lambda s: s["created_at"])["session_id"])
+        if cached and cached != sid:
+            previous = sessions[cached]
+            previous["targets"].remove(target)
+            if not previous["targets"] and not previous.get("direct", False):
+                del sessions[cached]
+        position = sessions.setdefault(sid, {"cursor": None, "event_id": None, "direct": False})
+        position.setdefault("direct", not position.get("targets"))
+        if target not in position.setdefault("targets", []):
+            position["targets"].append(target)
+        return account, sid
+
+    async def _operate(self, data, target, account, session_id, operation):
+        name, sid = await self._resolve(data, target, account, session_id)
+        try:
+            return name, sid, await operation(name, sid)
+        except DevinAPIError as exc:
+            if exc.status_code not in {404, 410} or not self.config.targets.get(target, {}).get(
+                "bot_service_user_id"
+            ):
+                raise
+        name, sid = await self._resolve(data, target, account, session_id, force=True)
+        return name, sid, await operation(name, sid)
+
     async def create_session(self, account: str, prompt: str, title: str | None = None):
         """Create and automatically watch a new Devin session."""
         result = await self.client(account).create_session(prompt, title)
@@ -38,18 +100,34 @@ class Bridge:
         self, target: str | None = None, account: str | None = None, session_id: str | None = None
     ):
         """Watch a session. Its existing messages are initially unread."""
-        account, sid = self.config.resolve(target, account, session_id)
         async with self.state.transaction() as data:
-            data.setdefault(account, {}).setdefault(sid, {"cursor": None, "event_id": None})
+            account, sid = await self._resolve(data, target, account, session_id)
+            position = data.setdefault(account, {}).setdefault(
+                sid, {"cursor": None, "event_id": None}
+            )
+            if not self.config.targets.get(target, {}).get("bot_service_user_id"):
+                position["direct"] = True
         return {"account": account, "session_id": sid, "watched": True}
 
     async def unwatch_session(
         self, target: str | None = None, account: str | None = None, session_id: str | None = None
     ):
         """Stop watching and forget the last-seen position."""
-        account, sid = self.config.resolve(target, account, session_id)
         async with self.state.transaction() as data:
-            data.get(account, {}).pop(sid, None)
+            account, sid = self.config.resolve(target, account, session_id)
+            sessions = data.get(account, {})
+            if self.config.targets.get(target, {}).get("bot_service_user_id"):
+                sid = next((s for s, p in sessions.items() if target in p.get("targets", [])), None)
+                if sid:
+                    sessions[sid]["targets"].remove(target)
+                    if not sessions[sid]["targets"] and not sessions[sid].get("direct", False):
+                        del sessions[sid]
+            else:
+                position = sessions.get(sid, {})
+                if position.get("targets"):
+                    position["direct"] = False
+                else:
+                    sessions.pop(sid, None)
         return {"account": account, "session_id": sid, "watched": False}
 
     async def send_message(
@@ -60,9 +138,19 @@ class Bridge:
         session_id: str | None = None,
     ):
         """Send to a target alias OR an account/session pair; automatically watch it."""
-        account, sid = self.config.resolve(target, account, session_id)
-        result = await self.client(account).send_message(sid, message)
-        await self.watch_session(account=account, session_id=sid)
+        async with self.state.transaction() as data:
+            account, sid, result = await self._operate(
+                data,
+                target,
+                account,
+                session_id,
+                lambda name, sid: self.client(name).send_message(sid, message),
+            )
+            position = data.setdefault(account, {}).setdefault(
+                sid, {"cursor": None, "event_id": None}
+            )
+            if not self.config.targets.get(target, {}).get("bot_service_user_id"):
+                position["direct"] = True
         return result
 
     async def _read(self, data, account, sid, only_new=True, include_user=False):
@@ -92,9 +180,16 @@ class Bridge:
         include_user: bool = False,
     ):
         """Read all pages, advance last-seen position, and watch. Default: new Devin replies."""
-        account, sid = self.config.resolve(target, account, session_id)
         async with self.state.transaction() as data:
-            messages = await self._read(data, account, sid, only_new, include_user)
+            account, sid, messages = await self._operate(
+                data,
+                target,
+                account,
+                session_id,
+                lambda name, sid: self._read(data, name, sid, only_new, include_user),
+            )
+            if not self.config.targets.get(target, {}).get("bot_service_user_id"):
+                data[account][sid]["direct"] = True
         return {"account": account, "session_id": sid, "messages": messages}
 
     async def check_inbox(self, account: str | None = None):
@@ -103,17 +198,26 @@ class Bridge:
             self.client(account)
         groups = []
         async with self.state.transaction() as data:
+            work = []
             for name, sessions in data.items():
                 if account and name != account:
                     continue
-                for sid in sessions:
-                    group = {"account": name, "session_id": sid}
-                    try:
-                        messages = await self._read(data, name, sid)
-                        if messages:
-                            groups.append({**group, "messages": messages})
-                    except ValueError as exc:
-                        groups.append({**group, "error": str(exc)})
+                for sid, position in sessions.items():
+                    work.extend((alias, None, None) for alias in position.get("targets", []))
+                    if position.get("direct", not position.get("targets")):
+                        work.append((None, name, sid))
+            for target, name, sid in work:
+                group = {"target": target} if target else {"account": name, "session_id": sid}
+                try:
+                    name, sid, messages = await self._operate(
+                        data, target, name, sid, lambda n, s: self._read(data, n, s)
+                    )
+                    if messages:
+                        groups.append(
+                            {**group, "account": name, "session_id": sid, "messages": messages}
+                        )
+                except ValueError as exc:
+                    groups.append({**group, "error": str(exc)})
         return {"sessions": groups}
 
     async def wait_for_reply(
@@ -127,12 +231,11 @@ class Bridge:
         """Mark existing messages seen, then wait for new Devin replies (not old unread ones)."""
         if not 0 <= timeout_seconds <= 3600 or not 0 < poll_seconds <= 300:
             raise ValueError("timeout_seconds must be 0..3600; poll_seconds must be >0 and <=300")
-        account, sid = self.config.resolve(target, account, session_id)
         deadline = time.monotonic() + timeout_seconds
-        await self.read_messages(account=account, session_id=sid)
+        result = await self.read_messages(target=target, account=account, session_id=session_id)
         while time.monotonic() < deadline:
             await asyncio.sleep(min(poll_seconds, max(0, deadline - time.monotonic())))
-            result = await self.read_messages(account=account, session_id=sid)
+            result = await self.read_messages(target=target, account=account, session_id=session_id)
             if result["messages"]:
                 return {**result, "timed_out": False}
-        return {"account": account, "session_id": sid, "messages": [], "timed_out": True}
+        return {**result, "messages": [], "timed_out": True}

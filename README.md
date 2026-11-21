@@ -12,10 +12,15 @@ no Node, webhook server, inbound port, or public deployment required.
 
 ## Setup
 
-1. For each Devin account, go to **app.devin.ai → Settings → Service users / API
-   keys** and create a service-user key, or use a personal access token. Give it
-   session creation, reading, and messaging permissions in the intended org;
-   `ViewOrgSessions` is needed for listing all org sessions. Find the `org-...` ID.
+1. For each Devin account, create a **Personal Access Token** at
+   **app.devin.ai → Settings → Devin API → PATs** (recommended for this local bridge).
+   PATs work with any plan's organization, including individual Pro/Max accounts,
+   and can call `/v3/organizations/{org_id}/*` for every org your user can access.
+   They inherit your user permissions; enterprise PAT policies may require approval.
+   Find the `org-...` organization ID at the top of **Settings → Devin API**.
+   Service-user API keys are an alternative, especially for shared automation:
+   grant session creation, reading and messaging permissions in the intended org.
+   `ViewOrgSessions` is required for listing org sessions and discovering Bots.
 2. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and export
    keys in the environment that launches Claude Code. For a single account, no
    config file is needed:
@@ -31,7 +36,8 @@ no Node, webhook server, inbound port, or public deployment required.
    `DEVIN_MAX2_API_KEY` and `DEVIN_WORK_API_KEY`. `[accounts.<name>]` supports
    `org_id`, `api_key_env` (preferred) or `api_key`, and optional `base_url`.
    If `api_key_env` is set, it takes precedence and must be present/nonempty.
-   `[targets.<alias>]` supports `account`, `session_id`, and optional `description`.
+   `[targets.<alias>]` supports `account`, exactly one of `session_id` or
+   `bot_service_user_id`, and optional `description`.
    Never commit real keys; restrict config permissions with `chmod 600` if it
    contains literal keys. `base_url` receives the bearer key: only use trusted URLs.
 3. Register the server:
@@ -64,6 +70,7 @@ The alias already identifies its account; tool calls use either `target` OR
 | Tool | Behavior |
 | --- | --- |
 | `list_accounts()` | Names, org IDs, and targets; never keys |
+| `list_bots(account)` | Root conversations grouped by service user; newest session ID, title and status per Bot |
 | `list_sessions(account, limit=100)` | Returns API page (`items`, `end_cursor`, `has_next_page`); limit 1–200 |
 | `create_session(account, prompt, title?)` | Creates and watches; returns the API session object |
 | `send_message(message, target? / account+session_id)` | Sends and watches; returns the updated API session object |
@@ -80,6 +87,39 @@ cursor. `wait_for_reply` deliberately discards previously unread history, includ
 replies that arrived before the call: use `read_messages` after sending if you want
 to catch those too. Timeout is 0–3600 seconds; poll interval is >0–300 seconds.
 The initial history fetch and state-lock acquisition may add API latency to a wait.
+There is a final poll at the deadline, even when the timeout is shorter than the
+poll interval; that request can add network latency to the timeout.
+
+### Bot targets that survive recycling
+
+Bots get a new conversation session when recycled or restarted. Prefer their
+stable `service-user-...` ID over pinning their current `devin-...` session:
+
+```toml
+[targets.research-bot]
+account = "max2"
+bot_service_user_id = "service-user-your-bot"
+description = "Research Bot"
+```
+
+Ask Claude to call `list_bots("max2")` to find this ID. The tool groups non-archived
+root sessions by `service_user_id`; ordinary service users can appear too, so
+identify your Bot by its conversation title. Child sessions are excluded.
+The latest session is chosen by `created_at`. Bot target resolution caches the
+newest non-archived, non-terminal root session in state, using the API's
+`service_user_ids` filter. Query model fields are sent as ordinary URL query
+parameters (`service_user_ids=service-user-...&is_archived=false`), not a JSON `qs`
+string; arrays use repeated keys (OpenAPI form/explode encoding).
+
+On each target call, the cached session's status is checked. `exit` and `error`
+are terminal; `suspended` is not (sending can resume it). Terminal or archived
+sessions, and 404/410 responses, trigger fresh resolution. A failed operation is
+retried at most once on the newly resolved session. Inbox watches retain the alias
+while moving to the new session, with a separate cursor for that session, so an
+old conversation cursor is never applied to a new one. If no active root exists,
+the call reports an error and a later inbox check can try again. Unwatching a Bot
+forgets its alias/cache without making network requests. Explicit `session_id`
+targets keep their original behavior and never switch sessions automatically.
 
 State lives at `~/.local/state/devin-claude-bridge/state.json`, overridden by
 `DEVIN_BRIDGE_STATE`. It stores watched sessions and last-seen cursor/event ID,

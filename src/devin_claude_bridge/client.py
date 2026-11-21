@@ -3,6 +3,12 @@ import httpx
 from .config import Account, session_id
 
 
+class DevinAPIError(ValueError):
+    def __init__(self, status_code, message):
+        self.status_code = status_code
+        super().__init__(message)
+
+
 class DevinClient:
     def __init__(self, account: Account, transport=None):
         self.account = account
@@ -36,9 +42,10 @@ class DevinClient:
                 410: "Session unavailable (possibly suspended or terminated)",
             }
             detail = str(detail).replace(self.account.api_key, "[REDACTED]")
-            raise ValueError(
+            raise DevinAPIError(
+                response.status_code,
                 f"Devin API {response.status_code}: "
-                f"{labels.get(response.status_code, response.reason_phrase)}: {detail}"
+                f"{labels.get(response.status_code, response.reason_phrase)}: {detail}",
             )
         return response.json()
 
@@ -46,6 +53,29 @@ class DevinClient:
         if not 1 <= limit <= 200:
             raise ValueError("limit must be between 1 and 200")
         return await self.request("GET", params={"first": limit})
+
+    async def root_sessions(self, service_user_id=None):
+        params = {"first": 200, "is_archived": "false"}
+        if service_user_id:
+            params["service_user_ids"] = [service_user_id]
+        items = []
+        seen = set()
+        while True:
+            page = await self.request("GET", params=params)
+            items.extend(
+                s
+                for s in page["items"]
+                if not s.get("parent_session_id")
+                and not s.get("is_archived")
+                and (not service_user_id or s.get("service_user_id") == service_user_id)
+            )
+            if not page.get("has_next_page"):
+                return items
+            cursor = page.get("end_cursor")
+            if not cursor or cursor in seen:
+                raise ValueError("Devin API returned a non-advancing pagination cursor")
+            seen.add(cursor)
+            params["after"] = cursor
 
     async def create_session(self, prompt, title=None):
         body = {"prompt": prompt}
