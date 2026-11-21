@@ -12,6 +12,8 @@ def create_server(bridge=None):
         "list_bots",
         "list_sessions",
         "create_session",
+        "add_target",
+        "remove_target",
         "send_message",
         "read_messages",
         "wait_for_reply",

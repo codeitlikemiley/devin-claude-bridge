@@ -225,7 +225,7 @@ async def test_legacy_cache_without_identity_is_resolved_again(bridge):
 @pytest.mark.parametrize("by_alias", [True, False])
 async def test_removed_alias_is_skipped_and_can_be_unwatched(bridge, by_alias):
     await bridge.watch_session(target="bot")
-    bridge.config.targets.clear()
+    bridge.file_targets.clear()
     result = await bridge.check_inbox()
     assert result["sessions"] == []
     assert result["skipped_targets"][0]["target"] == "bot"

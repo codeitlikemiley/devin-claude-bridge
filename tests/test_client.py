@@ -28,7 +28,7 @@ async def test_calls_and_pagination():
                 200,
                 json={"items": [{"event_id": "a"}], "end_cursor": "page1", "has_next_page": True},
             )
-        return httpx.Response(200, json={"session_id": "devin-abc"})
+        return httpx.Response(200, json={"session_id": "devin-abc", "items": []})
 
     client = DevinClient(Account("org-one", "secret"), httpx.MockTransport(handler))
     await client.list_sessions(12)
@@ -48,6 +48,10 @@ async def test_calls_and_pagination():
     assert dict(requests[-1].url.params) == {"first": "100", "after": "page1"}
     with pytest.raises(ValueError, match="limit"):
         await client.list_sessions(201)
+    await client.recent_sessions()
+    assert dict(requests[-1].url.params) == {"first": "200", "is_archived": "false"}
+    await client.recent_sessions(active_only=False)
+    assert dict(requests[-1].url.params) == {"first": "200"}
 
 
 @pytest.mark.parametrize("status", [401, 403, 404, 409, 410, 429])
