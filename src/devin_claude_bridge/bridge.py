@@ -39,6 +39,8 @@ def _brief(account, session, aliases=()):
     if isinstance(updated, (int, float)):
         stamp = datetime.fromtimestamp(updated, timezone.utc)
         row["updated"] = stamp.strftime("%Y-%m-%d %H:%M UTC")
+    if session.get("parent_session_id"):
+        row["child_of"] = normalize(session["parent_session_id"])
     if aliases:
         row["targets"] = sorted(aliases)
     return row
@@ -160,7 +162,8 @@ class Bridge:
         """List recent sessions, newest activity first, in every account or in one.
 
         By default only sessions that can still be messaged: not archived and not
-        ended. Each one has its title, status, URL and the targets pinned to it.
+        ended. Each one has its title, status, URL and the targets pinned to it; a
+        session another session started also has `child_of`, its parent's ID.
         `limit` is per account, 1 to 200, taken from that account's newest 200.
         """
         if not 1 <= limit <= 200:

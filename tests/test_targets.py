@@ -426,12 +426,16 @@ async def test_list_sessions_across_accounts(bridge, orgs):
     orgs["work"].add("archived", is_archived=True, updated_at=50)
     orgs["work"].add("done", status="exit", updated_at=40)
     orgs["hexuria"].add("b", updated_at=30, status="suspended", status_detail="inactivity")
+    orgs["hexuria"].add("kid", updated_at=5, parent_session_id="b")
     await bridge.add_target("hexuria", "b")
     listed = await bridge.list_sessions()
     assert [(s["account"], s["title"]) for s in listed["sessions"]] == [
         ("hexuria", "B"),
         ("work", "A"),
+        ("hexuria", "Kid"),
     ]
+    assert listed["sessions"][2]["child_of"] == "devin-b"
+    assert "child_of" not in listed["sessions"][0]
     assert listed["sessions"][0]["targets"] == ["hexuria"]
     assert listed["sessions"][0]["status_detail"] == "inactivity"
     assert listed["sessions"][0]["updated"] == "1970-01-01 00:00 UTC"
@@ -439,7 +443,7 @@ async def test_list_sessions_across_accounts(bridge, orgs):
     assert [s["title"] for s in everything["sessions"]] == ["Archived", "Done"]
     orgs["work"].down = True
     partial = await bridge.list_sessions()
-    assert [s["account"] for s in partial["sessions"]] == ["hexuria"]
+    assert {s["account"] for s in partial["sessions"]} == {"hexuria"}
     assert partial["errors"][0]["account"] == "work"
     with pytest.raises(ValueError, match="limit"):
         await bridge.list_sessions(limit=0)
