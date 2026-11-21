@@ -255,11 +255,13 @@ To talk to one session by a short name, give Claude its URL:
 
 `add_target` reads the session ID from the URL, asks each configured account for
 that session until one has it, and saves the alias. From then on
-`target="hexuria"` works everywhere, with no account or session ID to give. The
-session is watched from that moment, so the inbox shows new replies, not the
-earlier history. Aliases are saved in `targets.json` beside the state file, so
-the MCP server and the `inbox` command share them; your `config.toml` is never
-rewritten. An alias in `config.toml` works the same way but is changed there.
+`target="hexuria"` works everywhere, with no account or session ID to give. A
+session that was not watched yet is watched from that moment, so the inbox
+shows new replies, not the earlier history; one that was already watched keeps
+its unread replies. Aliases are saved in their own file beside the state file
+(`state.json.targets.json`), so the MCP server and the `inbox` command share
+them; your `config.toml` is never rewritten. An alias in `config.toml` works the
+same way but is changed there.
 
 **An archived or ended session is not a valid target.**
 
@@ -268,8 +270,11 @@ rewritten. An alias in `config.toml` works the same way but is changed there.
   (status `exit` or `error`), nothing is sent, and the error says how to re-point
   the alias and lists the active sessions. A suspended session is fine: Devin
   resumes it when the message arrives.
-* The inbox delivers the last unread replies of such a session, stops watching
-  it, and reports the alias once under `notices`.
+* The inbox reads a watched alias session's status before its messages. Once it
+  sees the session archived or ended, it delivers the last unread replies, stops
+  watching the session, and reports the alias once under `notices`. If that last
+  read fails, the watch is kept until a read succeeds. The same happens after a
+  refused send, and when you move an alias away from a dead session.
 * The bridge never picks a replacement session by itself. Move the alias with
   `add_target` again, or with `create_session(..., alias=...)`.
 
@@ -330,8 +335,8 @@ even after deleting the config entry, or unwatch any entry by account/session ID
 (which removes all aliases watching that specific entry).
 
 State lives at `~/.local/state/devin-claude-bridge/state.json`, overridden by
-`DEVIN_BRIDGE_STATE`; aliases made with `add_target` are in `targets.json` in the
-same folder. It stores watched sessions and last-seen cursor/event ID,
+`DEVIN_BRIDGE_STATE`; aliases made with `add_target` are in a file named after
+it, `state.json.targets.json`, in the same folder. It stores watched sessions and last-seen cursor/event ID,
 not API keys or message bodies. Writes are atomic and serialized with a POSIX
 file lock (Linux/macOS). MCP and CLI share consumption: inbox messages read by
 one are no longer new to the other. Avoid concurrent inbox polling and waits on

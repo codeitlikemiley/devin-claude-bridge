@@ -1,8 +1,9 @@
 """Aliases added at run time, kept beside the state file.
 
 `config.toml` stays the user's own file. Aliases made with `add_target` live in
-`targets.json`, together with a note of which aliases point at a session that
-is archived or has ended, so that is reported once and not on every poll.
+their own file, named after the state file, together with a note of which
+aliases point at a session that is archived or has ended, so that is reported
+once and not on every poll.
 """
 
 import fcntl
@@ -46,6 +47,16 @@ def ended(session) -> str | None:
     return None
 
 
+def store_path(state_path) -> Path:
+    """The aliases file of one state file: its full name plus `.targets.json`.
+
+    Built from the whole file name, so no state file shares an aliases file with
+    another one in the same folder, and the two can never be the same file.
+    """
+    state_path = Path(state_path)
+    return state_path.with_name(state_path.name + ".targets.json")
+
+
 class TargetStore:
     def __init__(self, path):
         self.path = Path(path)
@@ -57,6 +68,7 @@ class TargetStore:
             return {"targets": {}, "stale": {}}
         valid = (
             isinstance(data, dict)
+            and set(data) <= {"targets", "stale"}
             and isinstance(data.get("targets", {}), dict)
             and isinstance(data.get("stale", {}), dict)
             and all(
@@ -75,7 +87,7 @@ class TargetStore:
     def edit(self):
         """Change the file under a lock. Never await inside: the lock blocks."""
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with self.path.with_suffix(".lock").open("a") as lock:
+        with self.path.with_name(self.path.name + ".lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:
                 data = self.read()

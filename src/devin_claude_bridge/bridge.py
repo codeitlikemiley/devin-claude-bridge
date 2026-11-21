@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from .client import DevinAPIError, DevinClient
 from .config import session_id as normalize
 from .state import State
-from .targets import ALIAS, TargetStore, ended, session_from
+from .targets import ALIAS, TargetStore, ended, session_from, store_path
 
 
 def _what(session, reason):
@@ -48,7 +48,7 @@ class Bridge:
     def __init__(self, config, state=None, client_factory=DevinClient, targets=None):
         self.config = config
         self.state = state or State()
-        self.store = targets or TargetStore(self.state.path.with_name("targets.json"))
+        self.store = targets or TargetStore(store_path(self.state.path))
         self.file_targets = dict(config.targets)
         self.clients = {name: client_factory(a) for name, a in config.accounts.items()}
 
@@ -95,13 +95,19 @@ class Bridge:
         return [f"Active sessions on account {account}:", *lines] if lines else []
 
     async def _require_live(self, target, account, sid):
-        """Refuse to message a session that is archived or has ended."""
+        """Refuse to message a session that is archived or has ended.
+
+        Its watch is then marked to end once the inbox has read its last replies.
+        """
         session = await self.client(account).get_session(sid)
         reason = ended(session)
         if target:
             self._note_stale(target, sid, reason)
         if not reason:
             return
+        async with self.state.transaction() as data:
+            if sid in data.get(account, {}):
+                data[account][sid]["retire"] = True
         named = _named(session)
         if target:
             head = f"Target {target} points to a session that {_what(session, reason)}"
@@ -201,7 +207,7 @@ class Bridge:
         if not previous or (previous["account"], previous["session_id"]) == (account, sid):
             return None
         old_account, old_sid = previous["account"], previous["session_id"]
-        still_watched = True
+        watch = "kept"
         if old_account in self.clients and (old_account, old_sid) not in self._aliases():
             try:
                 dead = ended(await self.client(old_account).get_session(old_sid))
@@ -209,11 +215,14 @@ class Bridge:
                 dead = "not found" if exc.status_code in {404, 410} else None
             except ValueError:
                 dead = None
-            if dead:
-                async with self.state.transaction() as data:
+            async with self.state.transaction() as data:
+                if dead == "not found":
                     self._drop_watch(data, old_account, old_sid)
-                still_watched = False
-        return {"account": old_account, "session_id": old_sid, "still_watched": still_watched}
+                    watch = "removed"
+                elif dead and old_sid in data.get(old_account, {}):
+                    data[old_account][old_sid]["retire"] = True
+                    watch = "ends after its last replies are read"
+        return {"account": old_account, "session_id": old_sid, "watch": watch}
 
     async def add_target(
         self,
@@ -227,8 +236,10 @@ class Bridge:
         Afterwards target=<alias> works wherever a target is accepted. Unless you
         name the account, each configured account is asked for the session. An
         archived or ended session is refused. Calling this again with the same
-        alias moves it to the new session. The session is watched from now on: the
-        inbox shows replies that arrive after this call, not the earlier history.
+        alias moves it to the new session. A session that was not watched yet is
+        watched from now on: the inbox shows replies that arrive after this call,
+        not the earlier history. One that was already watched keeps its unread
+        replies.
         """
         self._refresh()
         self._check_alias(alias)
@@ -482,7 +493,11 @@ class Bridge:
         """
         self._refresh()
         if not self._bot(target):
-            await self._require_live(target, *self.config.resolve(target, account, session_id))
+            # Resolve a pinned target once: the session that passes the check is the
+            # one that gets the message, even if the alias is moved meanwhile.
+            account, session_id = self.config.resolve(target, account, session_id)
+            await self._require_live(target, account, session_id)
+            target = None
         async with self.state.transaction() as data:
             account, sid, result = await self._operate(
                 data,
@@ -494,6 +509,7 @@ class Bridge:
             position = data.setdefault(account, {}).setdefault(
                 sid, {"cursor": None, "event_id": None}
             )
+            position.pop("retire", None)
             if not self.config.targets.get(target, {}).get("bot_service_user_id"):
                 position["direct"] = True
         return result
@@ -542,9 +558,9 @@ class Bridge:
     async def check_inbox(self, account: str | None = None):
         """Read new Devin messages across watched sessions; isolate errors per session.
 
-        `notices` names each target whose session was archived or has ended. Its
-        last replies are delivered here, then it is no longer watched; the notice
-        appears once.
+        `notices` names each target whose watched session was archived or has
+        ended. Its last replies are delivered here, then it is no longer watched;
+        the notice appears once.
         """
         if account:
             self.client(account)
@@ -555,6 +571,49 @@ class Bridge:
         notices = []
         newly_stale = {}
         async with self.state.transaction() as data:
+            # A session's status is read before its messages, so the read that
+            # follows covers everything a session seen as archived or ended said.
+            checks = []
+            for alias, entry in self.config.targets.items():
+                name, sid = entry["account"], entry.get("session_id")
+                if not sid or name not in self.clients or (account and name != account):
+                    continue
+                if stale.get(alias, {}).get("session_id") == sid or sid not in data.get(name, {}):
+                    continue
+                checks.append((alias, name, sid))
+            calls = [self.client(name).get_session(sid) for _, name, sid in checks]
+            answers = await asyncio.gather(*calls, return_exceptions=True)
+            for (alias, name, sid), answer in zip(checks, answers):
+                if isinstance(answer, DevinAPIError) and answer.status_code in {404, 410}:
+                    info, reason = {}, "not found"
+                elif isinstance(answer, ValueError):
+                    continue
+                elif isinstance(answer, BaseException):
+                    raise answer
+                else:
+                    info, reason = answer, ended(answer)
+                if not reason:
+                    continue
+                if reason == "not found":
+                    self._drop_watch(data, name, sid)
+                elif sid in data.get(name, {}):
+                    data[name][sid]["retire"] = True
+                newly_stale[alias] = {"session_id": sid, "reason": reason}
+                named = _named(info)
+                notices.append(
+                    {
+                        "target": alias,
+                        "account": name,
+                        "session_id": sid,
+                        "reason": reason,
+                        "message": (
+                            f"Target {alias}: its session {_what(info, reason)}"
+                            f"{': ' + named if named else ''}. Re-point it with "
+                            f'add_target("{alias}", <session URL>) or '
+                            f'create_session(..., alias="{alias}").'
+                        ),
+                    }
+                )
             work = []
             for name, sessions in data.items():
                 if account and name != account:
@@ -592,40 +651,15 @@ class Bridge:
                     data.clear()
                     data.update(before)
                     groups.append({**group, "error": str(exc)})
+            # A watch marked to end goes once its last replies were read without error.
             failed = {(g.get("account"), g.get("session_id")) for g in groups if "error" in g}
-            for alias, entry in self.config.targets.items():
-                name, sid = entry["account"], entry.get("session_id")
-                if not sid or name not in self.clients or (account and name != account):
-                    continue
-                if stale.get(alias, {}).get("session_id") == sid:
-                    continue
-                try:
-                    info = await self.client(name).get_session(sid)
-                    reason = ended(info)
-                except DevinAPIError as exc:
-                    info, reason = {}, "not found" if exc.status_code in {404, 410} else None
-                except ValueError:
-                    continue
-                if not reason:
-                    continue
-                if reason == "not found" or (name, sid) not in failed:
-                    self._drop_watch(data, name, sid)
-                newly_stale[alias] = {"session_id": sid, "reason": reason}
-                named = _named(info)
-                notices.append(
-                    {
-                        "target": alias,
-                        "account": name,
-                        "session_id": sid,
-                        "reason": reason,
-                        "message": (
-                            f"Target {alias}: its session {_what(info, reason)}"
-                            f"{': ' + named if named else ''}. Re-point it with "
-                            f'add_target("{alias}", <session URL>) or '
-                            f'create_session(..., alias="{alias}").'
-                        ),
-                    }
-                )
+            for name, sessions in data.items():
+                for sid, position in list(sessions.items()):
+                    if not position.get("retire") or (account and name != account):
+                        continue
+                    if (name, sid) not in failed:
+                        del position["retire"]
+                        self._drop_watch(data, name, sid)
         if newly_stale:
             with self.store.edit() as saved:
                 saved["stale"].update(newly_stale)

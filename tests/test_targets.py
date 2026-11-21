@@ -6,7 +6,7 @@ from devin_claude_bridge.bridge import Bridge
 from devin_claude_bridge.client import DevinAPIError
 from devin_claude_bridge.config import Account, Config
 from devin_claude_bridge.state import State
-from devin_claude_bridge.targets import TargetStore, session_from
+from devin_claude_bridge.targets import TargetStore, session_from, store_path
 
 
 class Org:
@@ -127,9 +127,8 @@ async def test_an_alias_is_shared_by_every_bridge_process(tmp_path, orgs):
     other = make(tmp_path, orgs)
     await other.send_message("from the cli", target="hexuria")
     assert orgs["hexuria"].sent == [("devin-one", "from the cli")]
-    assert TargetStore(tmp_path / "targets.json").read()["targets"]["hexuria"]["account"] == (
-        "hexuria"
-    )
+    saved = TargetStore(tmp_path / "state.json.targets.json").read()
+    assert saved["targets"]["hexuria"]["account"] == "hexuria"
 
 
 @pytest.mark.parametrize(
@@ -197,7 +196,9 @@ async def test_inbox_delivers_last_replies_then_reports_a_dead_alias_once(bridge
     await bridge.add_target("hexuria", "task")
     orgs["hexuria"].say("task", "final answer")
     session["is_archived"] = True
+    orgs["hexuria"].calls.clear()
     first = await bridge.check_inbox()
+    assert orgs["hexuria"].calls == [("get", "devin-task"), ("messages", "devin-task")]
     assert [m["message"] for m in first["sessions"][0]["messages"]] == ["final answer"]
     notice = first["notices"][0]
     assert (notice["target"], notice["reason"]) == ("hexuria", "archived")
@@ -236,26 +237,125 @@ async def test_inbox_keeps_the_watch_when_the_last_read_failed(bridge, orgs):
     assert "error" in result["sessions"][0] and result["notices"][0]["target"] == "hexuria"
     assert "devin-task" in json.loads(bridge.state.path.read_text())["hexuria"]
     orgs["hexuria"].messages = reading
+    orgs["hexuria"].say("task", "final answer")
+    later = await bridge.check_inbox()
+    assert [m["message"] for m in later["sessions"][0]["messages"]] == ["final answer"]
+    assert "notices" not in later
+    assert json.loads(bridge.state.path.read_text())["hexuria"] == {}
 
 
-async def test_repointing_moves_the_alias_and_drops_a_dead_old_watch(bridge, orgs):
+async def test_repointing_delivers_the_old_sessions_last_reply_before_dropping_it(bridge, orgs):
     old = orgs["hexuria"].add("old")
     orgs["hexuria"].add("new")
     await bridge.add_target("hexuria", "old", description="main task")
-    old["is_archived"] = True
+    orgs["hexuria"].say("old", "final answer")
+    old["status"] = "exit"
     moved = await bridge.add_target("hexuria", "https://app.devin.ai/sessions/new")
     assert moved["replaced"] == {
         "account": "hexuria",
         "session_id": "devin-old",
-        "still_watched": False,
+        "watch": "ends after its last replies are read",
     }
-    state = json.loads(bridge.state.path.read_text())["hexuria"]
-    assert list(state) == ["devin-new"]
+    inbox = await bridge.check_inbox()
+    assert [m["message"] for m in inbox["sessions"][0]["messages"]] == ["final answer"]
+    assert inbox["sessions"][0]["session_id"] == "devin-old" and "notices" not in inbox
+    assert list(json.loads(bridge.state.path.read_text())["hexuria"]) == ["devin-new"]
     target = bridge.list_accounts()["targets"]["hexuria"]
     assert (target["session_id"], target["description"]) == ("devin-new", "main task")
     orgs["hexuria"].add("third")
     again = await bridge.add_target("hexuria", "third")
-    assert again["replaced"]["still_watched"] is True
+    assert again["replaced"]["watch"] == "kept"
+    del orgs["hexuria"].sessions["devin-third"]
+    orgs["hexuria"].add("fourth")
+    gone = await bridge.add_target("hexuria", "fourth")
+    assert gone["replaced"]["watch"] == "removed"
+
+
+async def test_a_send_goes_to_the_session_that_passed_the_check(bridge, orgs):
+    orgs["work"].add("a")
+    orgs["work"].add("b")
+    await bridge.add_target("work", "a")
+    checking, moved = orgs["work"].get_session, []
+
+    async def moves_the_alias_meanwhile(sid):
+        answer = await checking(sid)
+        if not moved:
+            moved.append(sid)
+            await bridge.add_target("work", "b")
+        return answer
+
+    orgs["work"].get_session = moves_the_alias_meanwhile
+    await bridge.send_message("for a", target="work")
+    assert moved == ["devin-a"]
+    assert orgs["work"].sent == [("devin-a", "for a")]
+    assert bridge.list_accounts()["targets"]["work"]["session_id"] == "devin-b"
+
+
+async def test_a_refused_send_lets_the_inbox_read_the_rest_then_drop_the_watch(bridge, orgs):
+    session = orgs["hexuria"].add("task")
+    await bridge.add_target("hexuria", "task")
+    orgs["hexuria"].say("task", "last words")
+    session["is_archived"] = True
+    with pytest.raises(ValueError, match="is archived"):
+        await bridge.send_message("hello?", target="hexuria")
+    with pytest.raises(ValueError, match="is archived"):
+        await bridge.send_message("hello?", account="hexuria", session_id="task")
+    inbox = await bridge.check_inbox()
+    assert [m["message"] for m in inbox["sessions"][0]["messages"]] == ["last words"]
+    assert "notices" not in inbox
+    assert json.loads(bridge.state.path.read_text())["hexuria"] == {}
+
+
+async def test_an_unarchived_session_is_watched_again_after_a_send(bridge, orgs):
+    session = orgs["hexuria"].add("task")
+    await bridge.add_target("hexuria", "task")
+    session["is_archived"] = True
+    with pytest.raises(ValueError):
+        await bridge.send_message("x", target="hexuria")
+    session["is_archived"] = False
+    await bridge.send_message("back", target="hexuria")
+    await bridge.check_inbox()
+    assert "devin-task" in json.loads(bridge.state.path.read_text())["hexuria"]
+
+
+async def test_inbox_does_not_ask_about_aliases_it_does_not_watch(tmp_path, orgs):
+    bridge = make(tmp_path, orgs, {"filed": {"account": "work", "session_id": "devin-a"}})
+    orgs["work"].add("a", is_archived=True)
+    assert await bridge.check_inbox() == {"sessions": []}
+    assert orgs["work"].calls == []
+
+
+async def test_an_already_watched_session_keeps_its_unread_replies(bridge, orgs):
+    orgs["work"].add("a")
+    await bridge.watch_session(account="work", session_id="a")
+    orgs["work"].say("a", "said before the alias")
+    await bridge.add_target("work", "a")
+    inbox = await bridge.check_inbox()
+    assert [m["message"] for m in inbox["sessions"][0]["messages"]] == ["said before the alias"]
+
+
+async def test_the_aliases_file_never_shares_or_replaces_a_state_file(tmp_path, orgs):
+    assert store_path(tmp_path / "state.json") == tmp_path / "state.json.targets.json"
+    assert store_path(tmp_path / "targets.json") == tmp_path / "targets.json.targets.json"
+    orgs["work"].add("a")
+    orgs["work"].add("b")
+
+    def at(name):
+        config = Config({n: Account(f"org-{n}", "key") for n in orgs}, {})
+        return Bridge(config, State(tmp_path / name), lambda account: orgs[account.org_id[4:]])
+
+    first, second = at("targets.json"), at("other.json")
+    await first.watch_session(account="work", session_id="a")
+    await first.add_target("mine", "b")
+    assert set(json.loads((tmp_path / "targets.json").read_text())["work"]) == {
+        "devin-a",
+        "devin-b",
+    }
+    assert second.list_accounts()["targets"] == {}
+    await second.add_target("yours", "a")
+    assert list(first.list_accounts()["targets"]) == ["mine"]
+    with pytest.raises(ValueError, match="Invalid targets file"):
+        TargetStore(tmp_path / "targets.json").read()
 
 
 async def test_remove_target(bridge, orgs):
