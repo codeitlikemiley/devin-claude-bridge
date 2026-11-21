@@ -82,8 +82,8 @@ The last line is the result:
 * `HTTP 200`, after a JSON description of your user: the token works.
 * `HTTP 403` or `HTTP 401`: the token is wrong or expired. Devin answers a bad
   token with `403` and `"detail":"Unauthorized"`.
-* A line starting with `curl:` and `HTTP 000`: the request never reached Devin.
-  Check your network.
+* A line starting with `curl:` and `HTTP 000`: no response came back from Devin,
+  so the token was not checked. Check your network and run the command again.
 
 **Several accounts** need a config file. Copy
 [`config.example.toml`](config.example.toml) to
