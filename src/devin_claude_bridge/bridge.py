@@ -8,6 +8,9 @@ from .config import session_id as normalize
 from .state import State
 from .targets import ALIAS, TargetStore, ended, session_from, store_path
 
+# Devin has stopped working and the next move is the user's.
+IDLE_DETAILS = ("waiting_for_user", "waiting_for_approval", "finished")
+
 
 def _what(session, reason):
     if reason == "archived":
@@ -39,6 +42,8 @@ def _brief(account, session, aliases=()):
     if isinstance(updated, (int, float)):
         stamp = datetime.fromtimestamp(updated, timezone.utc)
         row["updated"] = stamp.strftime("%Y-%m-%d %H:%M UTC")
+    if session.get("parent_session_id"):
+        row["child_of"] = normalize(session["parent_session_id"])
     if aliases:
         row["targets"] = sorted(aliases)
     return row
@@ -121,6 +126,38 @@ class Bridge:
         lines = [f"{head}{': ' + named if named else ''}. Nothing was sent. {advice}"]
         raise ValueError("\n".join(lines + await self._active_lines(account)))
 
+    async def _dead(self, account, sids):
+        """Which of these sessions are archived, ended or gone: {sid: (session, reason)}."""
+        client = self.client(account)
+        try:
+            found = await client.sessions_by_id(sids)
+        except DevinAPIError as exc:
+            # A key that may read sessions but not list them: ask one by one.
+            if exc.status_code != 403:
+                raise
+            found = {}
+
+        async def one(sid):
+            # Absent from the list. Ask for it by itself before calling it gone.
+            try:
+                return await client.get_session(sid)
+            except DevinAPIError as exc:
+                return "not found" if exc.status_code in {404, 410} else None
+            except ValueError:
+                return None
+
+        missing = [sid for sid in sids if sid not in found]
+        for sid, answer in zip(missing, await asyncio.gather(*(one(sid) for sid in missing))):
+            found[sid] = answer
+        dead = {}
+        for sid in sids:
+            info = found[sid]
+            if info == "not found":
+                dead[sid] = ({}, "not found")
+            elif info is not None and ended(info):
+                dead[sid] = (info, ended(info))
+        return dead
+
     @staticmethod
     def _drop_watch(data, account, sid):
         """Stop watching a session directly; a Bot alias on it keeps its entry."""
@@ -160,7 +197,8 @@ class Bridge:
         """List recent sessions, newest activity first, in every account or in one.
 
         By default only sessions that can still be messaged: not archived and not
-        ended. Each one has its title, status, URL and the targets pinned to it.
+        ended. Each one has its title, status, URL and the targets pinned to it; a
+        session another session started also has `child_of`, its parent's ID.
         `limit` is per account, 1 to 200, taken from that account's newest 200.
         """
         if not 1 <= limit <= 200:
@@ -264,8 +302,12 @@ class Bridge:
             position = data.setdefault(name, {}).get(sid)
             if position is None:
                 items, cursor = await self.client(name).messages(sid)
-                last = items[-1]["event_id"] if items else None
-                data[name][sid] = {"cursor": cursor, "event_id": last, "direct": True}
+                data[name][sid] = {
+                    "cursor": cursor,
+                    "event_id": items[-1]["event_id"] if items else None,
+                    "direct": True,
+                    "answered": bool(items) and items[-1]["source"] == "devin",
+                }
             else:
                 # The session was just seen alive, so an earlier mark to end its
                 # watch no longer applies.
@@ -510,6 +552,7 @@ class Bridge:
                 sid, {"cursor": None, "event_id": None}
             )
             position.pop("retire", None)
+            position["answered"] = False
             if not self.config.targets.get(target, {}).get("bot_service_user_id"):
                 position["direct"] = True
         return result
@@ -530,6 +573,9 @@ class Bridge:
             position["cursor"] = cursor
         if items:
             position["event_id"] = items[-1]["event_id"]
+            # Whether Devin has answered the latest user message, kept because the
+            # messages that show it stop being unread once they are read.
+            position["answered"] = items[-1]["source"] == "devin"
         return [m for m in items if include_user or m["source"] == "devin"]
 
     async def read_messages(
@@ -558,9 +604,10 @@ class Bridge:
     async def check_inbox(self, account: str | None = None):
         """Read new Devin messages across watched sessions; isolate errors per session.
 
-        `notices` names each target whose watched session was archived or has
-        ended. Its last replies are delivered here, then it is no longer watched;
-        the notice appears once.
+        `notices` names each watched session that was archived, has ended or is
+        gone, with the targets pinned to it. Its last replies are delivered here,
+        then it is no longer watched, so the notice appears once. One request per
+        account reads the status of all its watched sessions.
         """
         if account:
             self.client(account)
@@ -574,44 +621,56 @@ class Bridge:
         async with self.state.transaction() as data:
             # A session's status is read before its messages, so the read that
             # follows covers everything a session seen as archived or ended said.
-            checks = []
-            for alias, entry in self.config.targets.items():
-                name, sid = entry["account"], entry.get("session_id")
-                if not sid or name not in self.clients or (account and name != account):
+            watched = {}
+            for name, sessions in data.items():
+                if name not in self.clients or (account and name != account):
                     continue
-                if stale.get(alias, {}).get("session_id") == sid or sid not in data.get(name, {}):
-                    continue
-                checks.append((alias, name, sid))
-            calls = [self.client(name).get_session(sid) for _, name, sid in checks]
+                sids = [
+                    sid
+                    for sid, position in sessions.items()
+                    if position.get("direct", not position.get("targets"))
+                    and not position.get("retire")
+                ]
+                if sids:
+                    watched[name] = sids
+            calls = [self._dead(name, sids) for name, sids in watched.items()]
             answers = await asyncio.gather(*calls, return_exceptions=True)
-            for (alias, name, sid), answer in zip(checks, answers):
-                if isinstance(answer, DevinAPIError) and answer.status_code in {404, 410}:
-                    info, reason = {}, "not found"
-                elif isinstance(answer, ValueError):
+            for name, answer in zip(watched, answers):
+                if isinstance(answer, ValueError):
                     continue
-                elif isinstance(answer, BaseException):
+                if isinstance(answer, BaseException):
                     raise answer
-                else:
-                    info, reason = answer, ended(answer)
-                if not reason:
-                    continue
-                data[name][sid]["retire"] = True
-                newly_stale[alias] = {"session_id": sid, "reason": reason}
-                named = _named(info)
-                notices.append(
-                    {
-                        "target": alias,
-                        "account": name,
-                        "session_id": sid,
-                        "reason": reason,
-                        "message": (
-                            f"Target {alias}: its session {_what(info, reason)}"
-                            f"{': ' + named if named else ''}. Re-point it with "
-                            f'add_target("{alias}", <session URL>) or '
-                            f'create_session(..., alias="{alias}").'
-                        ),
-                    }
-                )
+                for sid, (info, reason) in answer.items():
+                    data[name][sid]["retire"] = True
+                    named = _named(info)
+                    said = f"{_what(info, reason)}{': ' + named if named else ''}"
+                    aliases = sorted(pinned.get((name, sid), []))
+                    for alias in aliases:
+                        if stale.get(alias, {}).get("session_id") == sid:
+                            continue
+                        newly_stale[alias] = {"session_id": sid, "reason": reason}
+                        notices.append(
+                            {
+                                "target": alias,
+                                "account": name,
+                                "session_id": sid,
+                                "reason": reason,
+                                "message": (
+                                    f"Target {alias}: its session {said}. Re-point it with "
+                                    f'add_target("{alias}", <session URL>) or '
+                                    f'create_session(..., alias="{alias}").'
+                                ),
+                            }
+                        )
+                    if not aliases:
+                        notices.append(
+                            {
+                                "account": name,
+                                "session_id": sid,
+                                "reason": reason,
+                                "message": f"Session {sid} {said}. It is no longer watched.",
+                            }
+                        )
             work = []
             for name, sessions in data.items():
                 if account and name != account:
@@ -686,15 +745,113 @@ class Bridge:
         session_id: str | None = None,
         timeout_seconds: float = 300,
         poll_seconds: float = 15,
+        until_idle: bool = False,
     ):
-        """Mark existing messages seen, then wait for new Devin replies (not old unread ones)."""
+        """Wait for Devin's reply in one session; return it with the session's status.
+
+        Returns as soon as a Devin message follows the latest user message. Unread
+        replies from before this call count, so a fast answer to a message you
+        just sent is not missed. Nothing is discarded: every unread Devin message
+        read while waiting is in `messages`.
+
+        With until_idle, keeps collecting until Devin has answered and stops
+        working: it waits for you, has finished, or the session is suspended. Use
+        it to get the whole answer and not only its first line. If Devin already
+        answered and is idle, it returns at once.
+
+        The result has `status` and `status_detail` (working, waiting_for_user,
+        finished, ...) and `timed_out`. If the session was archived or has ended,
+        the wait stops and the result has `ended`. If a read fails after replies
+        were collected, or the last read of an ended session fails, the result has
+        `error` and the replies collected so far.
+        """
         if not 0 <= timeout_seconds <= 3600 or not 0 < poll_seconds <= 300:
             raise ValueError("timeout_seconds must be 0..3600; poll_seconds must be >0 and <=300")
         deadline = time.monotonic() + timeout_seconds
-        result = await self.read_messages(target=target, account=account, session_id=session_id)
-        while time.monotonic() < deadline:
-            await asyncio.sleep(min(poll_seconds, max(0, deadline - time.monotonic())))
-            result = await self.read_messages(target=target, account=account, session_id=session_id)
-            if result["messages"]:
-                return {**result, "timed_out": False}
-        return {**result, "messages": [], "timed_out": True}
+        held = []
+        name = sid = answered = None
+        info, reason = {}, None
+
+        async def read(bootstrap=True):
+            """Read what is unread; say whether Devin answered the latest user message."""
+            nonlocal name, sid, answered
+            result = await self.read_messages(
+                target=target, account=account, session_id=session_id, include_user=True
+            )
+            if (name, sid) != (result["account"], result["session_id"]):
+                # A Bot target moved to a new conversation: nothing is answered there yet.
+                name, sid, answered = result["account"], result["session_id"], None
+            for message in result["messages"]:
+                if message["source"] == "devin":
+                    held.append(message)
+                # Replies drained from a Bot's earlier conversation are returned, but
+                # they are not the answer of the conversation being waited on.
+                if message.get("session_id", sid) == sid:
+                    answered = message["source"] == "devin"
+            if answered is None and bootstrap:
+                answered, from_history = await self._answered(name, sid)
+                if from_history:
+                    # A reply may have arrived between the read above and that look
+                    # at the history. Read again, so a reply that was counted is
+                    # also in the result.
+                    await read(bootstrap=False)
+
+        def result(done, error=None):
+            return {
+                "account": name,
+                "session_id": sid,
+                "messages": held,
+                "timed_out": not done,
+                "status": info.get("status"),
+                "status_detail": info.get("status_detail"),
+                **({"ended": reason} if reason else {}),
+                **({"error": error} if error else {}),
+            }
+
+        while True:
+            # The last read always starts at or after the deadline, however long
+            # the reads before it took.
+            started = time.monotonic()
+            try:
+                await read()
+            except ValueError as exc:
+                if not held:
+                    raise
+                # The replies read so far are no longer unread: hand them over
+                # with the error, so they are not lost.
+                return result(True, str(exc))
+            try:
+                info = await self.client(name).get_session(sid)
+                reason = ended(info)
+            except DevinAPIError as exc:
+                info, reason = {}, "not found" if exc.status_code in {404, 410} else None
+            except ValueError:
+                info, reason = {}, None
+            failed = None
+            if reason and reason != "not found":
+                try:
+                    await read()  # what it said between the read above and its end
+                except ValueError as exc:
+                    failed = str(exc)
+            idle = info.get("status") == "suspended" or info.get("status_detail") in IDLE_DETAILS
+            done = bool(reason) or bool(answered and (idle if until_idle else held))
+            if done or started >= deadline:
+                return result(done, failed)
+            await asyncio.sleep(max(0, min(poll_seconds, deadline - time.monotonic())))
+
+    async def _answered(self, account, sid):
+        """Whether Devin answered the latest user message, when nothing unread shows it.
+
+        Returns the answer and whether it came from a fresh look at the history.
+        """
+        async with self.state.transaction() as data:
+            known = data.get(account, {}).get(sid, {}).get("answered")
+        if known is not None:
+            return known, False
+        # Never recorded for this session: look at the end of its history once.
+        items, _ = await self.client(account).messages(sid)
+        known = bool(items) and items[-1]["source"] == "devin"
+        async with self.state.transaction() as data:
+            if sid in data.get(account, {}):
+                data[account][sid].setdefault("answered", known)
+        return known, True

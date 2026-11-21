@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from unittest.mock import AsyncMock
 
 import pytest
@@ -23,6 +24,9 @@ def bridge(tmp_path):
     bridge = Bridge(config, State(tmp_path / "state.json"), lambda a: AsyncMock())
     for client in bridge.clients.values():
         client.get_session.return_value = {"status": "running", "is_archived": False}
+        client.sessions_by_id.side_effect = lambda sids: {
+            sid: {"status": "running", "is_archived": False} for sid in sids
+        }
     return bridge
 
 
@@ -60,7 +64,7 @@ async def test_read_inbox_positions_and_filtering(bridge):
     assert len(replay["messages"]) == 3
     client.messages.assert_awaited_with("devin-a", None)
     position = json.loads(bridge.state.path.read_text())["one"]["devin-a"]
-    assert position == {"cursor": "c3", "event_id": "3", "direct": True}
+    assert position == {"cursor": "c3", "event_id": "3", "direct": True, "answered": True}
 
 
 async def test_inbox_multiple_accounts_and_error_retains_cursor(bridge):
@@ -87,34 +91,6 @@ async def test_cursorless_last_page_dedup(bridge):
     assert len((await bridge.read_messages(target="bot"))["messages"]) == 1
     assert (await bridge.read_messages(target="bot"))["messages"] == [message("b")]
     assert (await bridge.read_messages(target="bot"))["messages"] == []
-
-
-async def test_wait_new_reply_and_timeout(bridge):
-    client = bridge.clients["one"]
-    client.messages.side_effect = [
-        ([message("old")], "c1"),
-        ([message("user", "user")], "c2"),
-        ([message("new")], "c3"),
-    ]
-    result = await bridge.wait_for_reply(target="bot", timeout_seconds=1, poll_seconds=0.001)
-    assert result["messages"] == [message("new")]
-    assert not result["timed_out"]
-    client.messages.side_effect = None
-    client.messages.return_value = ([], "c3")
-    result = await bridge.wait_for_reply(target="bot", timeout_seconds=0.01, poll_seconds=0.001)
-    assert result["timed_out"] and not result["messages"]
-    with pytest.raises(ValueError, match="timeout_seconds"):
-        await bridge.wait_for_reply(target="bot", poll_seconds=0)
-    client.messages.side_effect = ValueError("410 gone")
-    with pytest.raises(ValueError, match="410"):
-        await bridge.wait_for_reply(target="bot")
-
-
-async def test_wait_shorter_than_poll_still_reads_reply(bridge):
-    bridge.clients["one"].messages.side_effect = [([], None), ([message("arrived")], "new-cursor")]
-    result = await bridge.wait_for_reply(target="bot", timeout_seconds=0.01, poll_seconds=15)
-    assert result["messages"] == [message("arrived")]
-    assert not result["timed_out"]
 
 
 async def test_state_rollback_and_concurrent_transactions(bridge):
@@ -152,5 +128,7 @@ async def test_tools_registered(bridge):
         "watch_session",
         "unwatch_session",
     }
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("mcp.server.lowlevel.server").level == logging.WARNING
     schemas = {t.name: t.inputSchema for t in tools}
     assert schemas["send_message"]["required"] == ["message"]

@@ -61,6 +61,16 @@ class DevinClient:
             params["is_archived"] = "false"
         return (await self.request("GET", params=params))["items"]
 
+    async def sessions_by_id(self, sids):
+        """The listed sessions by ID, 100 per request. An unknown ID is simply absent."""
+        ids = [session_id(sid) for sid in sids]
+        found = {}
+        for start in range(0, len(ids), 100):
+            params = {"first": 200, "session_ids": ids[start : start + 100]}
+            for session in (await self.request("GET", params=params))["items"]:
+                found[session_id(session["session_id"])] = session
+        return found
+
     async def root_sessions(self, service_user_id=None):
         params = {"first": 200, "is_archived": "false"}
         if service_user_id:

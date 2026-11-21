@@ -1,5 +1,7 @@
 import os
 import re
+import shlex
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,6 +45,41 @@ class Config:
         if not session:
             raise ValueError("Provide target or account + session_id")
         return account, session_id(session)
+
+
+def key_from_command(name: str, command) -> str:
+    """The API key that `api_key_cmd` prints: one line on stdout.
+
+    The command runs without a shell. Its standard input is closed, because the
+    bridge's own standard input is the MCP connection.
+    """
+    argv = shlex.split(command) if isinstance(command, str) else [str(part) for part in command]
+    if not argv:
+        raise ValueError(f"Account {name}: api_key_cmd is empty")
+    try:
+        done = subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        raise ValueError(f"Account {name}: api_key_cmd: command not found: {argv[0]}") from None
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"Account {name}: api_key_cmd took longer than 30 seconds") from None
+    except OSError as exc:
+        raise ValueError(f"Account {name}: api_key_cmd could not run: {exc}") from None
+    if done.returncode:
+        said = (done.stderr.strip().splitlines() or [""])[-1][:200]
+        raise ValueError(
+            f"Account {name}: api_key_cmd exited with {done.returncode}{': ' + said if said else ''}"
+        )
+    key = done.stdout.strip()
+    if not key or "\n" in key:
+        raise ValueError(f"Account {name}: api_key_cmd must print the key and nothing else")
+    return key
 
 
 KEY_PREFIX = "DEVIN_API_KEY_"
@@ -110,9 +147,18 @@ def load_config() -> Config:
     entries.update(discovered)
     accounts = {}
     for name, entry in entries.items():
-        key = os.getenv(entry["api_key_env"]) if entry.get("api_key_env") else entry.get("api_key")
+        if entry.get("api_key_env") and entry.get("api_key_cmd"):
+            raise ValueError(f"Account {name}: set api_key_env or api_key_cmd, not both")
+        if entry.get("api_key_cmd"):
+            key = key_from_command(name, entry["api_key_cmd"])
+        elif entry.get("api_key_env"):
+            key = os.getenv(entry["api_key_env"])
+        else:
+            key = entry.get("api_key")
         if not key:
-            raise ValueError(f"Account {name}: missing API key; set api_key_env or api_key")
+            raise ValueError(
+                f"Account {name}: missing API key; set api_key_env, api_key_cmd or api_key"
+            )
         org = entry.get("org_id", "")
         for label, value in (("API key", key), ("org_id", org)):
             if value.startswith("${"):
