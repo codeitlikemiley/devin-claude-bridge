@@ -132,15 +132,7 @@ class Bridge:
         await self.read_messages(account=account, session_id=sid)
         while time.monotonic() < deadline:
             await asyncio.sleep(min(poll_seconds, max(0, deadline - time.monotonic())))
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                result = await asyncio.wait_for(
-                    self.read_messages(account=account, session_id=sid), timeout=remaining
-                )
-            except asyncio.TimeoutError:
-                break
+            result = await self.read_messages(account=account, session_id=sid)
             if result["messages"]:
                 return {**result, "timed_out": False}
         return {"account": account, "session_id": sid, "messages": [], "timed_out": True}

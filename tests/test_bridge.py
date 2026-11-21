@@ -107,6 +107,13 @@ async def test_wait_new_reply_and_timeout(bridge):
         await bridge.wait_for_reply(target="bot")
 
 
+async def test_wait_shorter_than_poll_still_reads_reply(bridge):
+    bridge.clients["one"].messages.side_effect = [([], None), ([message("arrived")], "new-cursor")]
+    result = await bridge.wait_for_reply(target="bot", timeout_seconds=0.01, poll_seconds=15)
+    assert result["messages"] == [message("arrived")]
+    assert not result["timed_out"]
+
+
 async def test_state_rollback_and_concurrent_transactions(bridge):
     await bridge.watch_session(target="bot")
     original = bridge.state.path.read_text()
