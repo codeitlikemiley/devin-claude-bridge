@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from fake import Org, make
 
 from devin_claude_bridge.bridge import Bridge
 from devin_claude_bridge.client import DevinAPIError
@@ -9,73 +10,9 @@ from devin_claude_bridge.state import State
 from devin_claude_bridge.targets import TargetStore, session_from, store_path
 
 
-class Org:
-    """One Devin organization held in memory."""
-
-    def __init__(self):
-        self.sessions = {}
-        self.sent = []
-        self.calls = []
-        self.down = False
-        self.status_gone = set()
-
-    def add(self, sid, **fields):
-        self.sessions[f"devin-{sid}"] = {
-            "session_id": f"devin-{sid}",
-            "title": sid.title(),
-            "url": f"https://app.devin.ai/sessions/{sid}",
-            "status": "running",
-            "is_archived": False,
-            "updated_at": len(self.sessions) + 1,
-            "messages": [],
-            **fields,
-        }
-        return self.sessions[f"devin-{sid}"]
-
-    def say(self, sid, text):
-        messages = self.sessions[f"devin-{sid}"]["messages"]
-        messages.append({"event_id": f"{sid}-{len(messages)}", "source": "devin", "message": text})
-
-    def _get(self, sid):
-        if self.down:
-            raise DevinAPIError(500, "Devin API 500: down")
-        if sid not in self.sessions:
-            raise DevinAPIError(404, "Devin API 404: Session or organization not found")
-        return self.sessions[sid]
-
-    async def get_session(self, sid):
-        self.calls.append(("get", sid))
-        if sid in self.status_gone:
-            raise DevinAPIError(410, "Devin API 410: Session unavailable")
-        return {k: v for k, v in self._get(sid).items() if k != "messages"}
-
-    async def recent_sessions(self, active_only=True):
-        if self.down:
-            raise DevinAPIError(500, "Devin API 500: down")
-        rows = [{k: v for k, v in s.items() if k != "messages"} for s in self.sessions.values()]
-        return [s for s in rows if not (active_only and s["is_archived"])]
-
-    async def messages(self, sid, after=None):
-        self.calls.append(("messages", sid))
-        items = self._get(sid)["messages"]
-        return items[int(after or 0) :], str(len(items))
-
-    async def send_message(self, sid, message):
-        self.sent.append((sid, message))
-        return await self.get_session(sid)
-
-    async def create_session(self, prompt, title=None):
-        return {k: v for k, v in self.add(f"new{len(self.sessions)}", title=title).items()}
-
-
 @pytest.fixture
 def orgs():
     return {"hexuria": Org(), "work": Org()}
-
-
-def make(tmp_path, orgs, targets=None):
-    config = Config({name: Account(f"org-{name}", "key") for name in orgs}, targets or {})
-    return Bridge(config, State(tmp_path / "state.json"), lambda account: orgs[account.org_id[4:]])
 
 
 @pytest.fixture
@@ -201,7 +138,7 @@ async def test_inbox_delivers_last_replies_then_reports_a_dead_alias_once(bridge
     session["is_archived"] = True
     orgs["hexuria"].calls.clear()
     first = await bridge.check_inbox()
-    assert orgs["hexuria"].calls == [("get", "devin-task"), ("messages", "devin-task")]
+    assert orgs["hexuria"].calls == [("status", ("devin-task",)), ("messages", "devin-task")]
     assert [m["message"] for m in first["sessions"][0]["messages"]] == ["final answer"]
     notice = first["notices"][0]
     assert (notice["target"], notice["reason"]) == ("hexuria", "archived")
@@ -449,3 +386,43 @@ async def test_list_sessions_across_accounts(bridge, orgs):
         await bridge.list_sessions(limit=0)
     with pytest.raises(ValueError, match="Unknown account"):
         await bridge.list_sessions(account="nope")
+
+
+async def test_inbox_retires_a_dead_watch_that_has_no_alias(bridge, orgs):
+    session = orgs["work"].add("plain")
+    orgs["work"].add("other")
+    await bridge.watch_session(account="work", session_id="plain")
+    await bridge.watch_session(account="work", session_id="other")
+    orgs["work"].say("plain", "last words")
+    session["status"] = "exit"
+    orgs["work"].calls.clear()
+    first = await bridge.check_inbox()
+    assert [c for c in orgs["work"].calls if c[0] == "status"] == [
+        ("status", ("devin-plain", "devin-other"))
+    ]
+    assert [m["message"] for m in first["sessions"][0]["messages"]] == ["last words"]
+    notice = first["notices"][0]
+    assert "target" not in notice and notice["reason"] == "ended"
+    assert "is no longer watched" in notice["message"]
+    assert list(json.loads(bridge.state.path.read_text())["work"]) == ["devin-other"]
+    assert await bridge.check_inbox() == {"sessions": []}
+
+
+async def test_inbox_stops_reporting_a_deleted_session(bridge, orgs):
+    orgs["work"].add("temp")
+    await bridge.watch_session(account="work", session_id="temp")
+    del orgs["work"].sessions["devin-temp"]
+    first = await bridge.check_inbox()
+    assert first["sessions"] == [] and first["notices"][0]["reason"] == "not found"
+    assert json.loads(bridge.state.path.read_text())["work"] == {}
+    assert await bridge.check_inbox() == {"sessions": []}
+
+
+async def test_inbox_still_reads_when_the_status_request_fails(bridge, orgs):
+    orgs["work"].add("a")
+    await bridge.add_target("work", "a")
+    orgs["work"].say("a", "hello")
+    orgs["work"].status_down = True
+    inbox = await bridge.check_inbox()
+    assert [m["message"] for m in inbox["sessions"][0]["messages"]] == ["hello"]
+    assert "notices" not in inbox

@@ -33,6 +33,9 @@ def bridge(tmp_path):
     bridge.clients["one"].root_sessions.return_value = [root("old")]
     bridge.clients["one"].get_session.return_value = root("old")
     bridge.clients["one"].messages.return_value = ([], None)
+    bridge.clients["one"].sessions_by_id.side_effect = lambda sids: {
+        sid: root(sid.removeprefix("devin-")) for sid in sids
+    }
     return bridge
 
 

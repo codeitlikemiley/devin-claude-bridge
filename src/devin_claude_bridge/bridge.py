@@ -8,6 +8,9 @@ from .config import session_id as normalize
 from .state import State
 from .targets import ALIAS, TargetStore, ended, session_from, store_path
 
+# Devin has stopped working and the next move is the user's.
+IDLE_DETAILS = ("waiting_for_user", "waiting_for_approval", "finished")
+
 
 def _what(session, reason):
     if reason == "archived":
@@ -122,6 +125,28 @@ class Bridge:
             advice = "Pick another session."
         lines = [f"{head}{': ' + named if named else ''}. Nothing was sent. {advice}"]
         raise ValueError("\n".join(lines + await self._active_lines(account)))
+
+    async def _dead(self, account, sids):
+        """Which of these sessions are archived, ended or gone: {sid: (session, reason)}."""
+        client = self.client(account)
+        found = await client.sessions_by_id(sids)
+        dead = {}
+        for sid in sids:
+            info = found.get(sid)
+            if info is None:
+                # Absent from the list. Ask for it by itself before calling it gone.
+                try:
+                    info = await client.get_session(sid)
+                except DevinAPIError as exc:
+                    if exc.status_code in {404, 410}:
+                        dead[sid] = ({}, "not found")
+                    continue
+                except ValueError:
+                    continue
+            reason = ended(info)
+            if reason:
+                dead[sid] = (info, reason)
+        return dead
 
     @staticmethod
     def _drop_watch(data, account, sid):
@@ -561,9 +586,10 @@ class Bridge:
     async def check_inbox(self, account: str | None = None):
         """Read new Devin messages across watched sessions; isolate errors per session.
 
-        `notices` names each target whose watched session was archived or has
-        ended. Its last replies are delivered here, then it is no longer watched;
-        the notice appears once.
+        `notices` names each watched session that was archived, has ended or is
+        gone, with the targets pinned to it. Its last replies are delivered here,
+        then it is no longer watched, so the notice appears once. One request per
+        account reads the status of all its watched sessions.
         """
         if account:
             self.client(account)
@@ -577,44 +603,56 @@ class Bridge:
         async with self.state.transaction() as data:
             # A session's status is read before its messages, so the read that
             # follows covers everything a session seen as archived or ended said.
-            checks = []
-            for alias, entry in self.config.targets.items():
-                name, sid = entry["account"], entry.get("session_id")
-                if not sid or name not in self.clients or (account and name != account):
+            watched = {}
+            for name, sessions in data.items():
+                if name not in self.clients or (account and name != account):
                     continue
-                if stale.get(alias, {}).get("session_id") == sid or sid not in data.get(name, {}):
-                    continue
-                checks.append((alias, name, sid))
-            calls = [self.client(name).get_session(sid) for _, name, sid in checks]
+                sids = [
+                    sid
+                    for sid, position in sessions.items()
+                    if position.get("direct", not position.get("targets"))
+                    and not position.get("retire")
+                ]
+                if sids:
+                    watched[name] = sids
+            calls = [self._dead(name, sids) for name, sids in watched.items()]
             answers = await asyncio.gather(*calls, return_exceptions=True)
-            for (alias, name, sid), answer in zip(checks, answers):
-                if isinstance(answer, DevinAPIError) and answer.status_code in {404, 410}:
-                    info, reason = {}, "not found"
-                elif isinstance(answer, ValueError):
+            for name, answer in zip(watched, answers):
+                if isinstance(answer, ValueError):
                     continue
-                elif isinstance(answer, BaseException):
+                if isinstance(answer, BaseException):
                     raise answer
-                else:
-                    info, reason = answer, ended(answer)
-                if not reason:
-                    continue
-                data[name][sid]["retire"] = True
-                newly_stale[alias] = {"session_id": sid, "reason": reason}
-                named = _named(info)
-                notices.append(
-                    {
-                        "target": alias,
-                        "account": name,
-                        "session_id": sid,
-                        "reason": reason,
-                        "message": (
-                            f"Target {alias}: its session {_what(info, reason)}"
-                            f"{': ' + named if named else ''}. Re-point it with "
-                            f'add_target("{alias}", <session URL>) or '
-                            f'create_session(..., alias="{alias}").'
-                        ),
-                    }
-                )
+                for sid, (info, reason) in answer.items():
+                    data[name][sid]["retire"] = True
+                    named = _named(info)
+                    said = f"{_what(info, reason)}{': ' + named if named else ''}"
+                    aliases = sorted(pinned.get((name, sid), []))
+                    for alias in aliases:
+                        if stale.get(alias, {}).get("session_id") == sid:
+                            continue
+                        newly_stale[alias] = {"session_id": sid, "reason": reason}
+                        notices.append(
+                            {
+                                "target": alias,
+                                "account": name,
+                                "session_id": sid,
+                                "reason": reason,
+                                "message": (
+                                    f"Target {alias}: its session {said}. Re-point it with "
+                                    f'add_target("{alias}", <session URL>) or '
+                                    f'create_session(..., alias="{alias}").'
+                                ),
+                            }
+                        )
+                    if not aliases:
+                        notices.append(
+                            {
+                                "account": name,
+                                "session_id": sid,
+                                "reason": reason,
+                                "message": f"Session {sid} {said}. It is no longer watched.",
+                            }
+                        )
             work = []
             for name, sessions in data.items():
                 if account and name != account:
@@ -689,15 +727,64 @@ class Bridge:
         session_id: str | None = None,
         timeout_seconds: float = 300,
         poll_seconds: float = 15,
+        until_idle: bool = False,
     ):
-        """Mark existing messages seen, then wait for new Devin replies (not old unread ones)."""
+        """Wait for Devin's reply in one session; return it with the session's status.
+
+        Returns as soon as a Devin message follows the latest user message. Unread
+        replies from before this call count, so a fast answer to a message you
+        just sent is not missed. Nothing is discarded: every unread Devin message
+        read while waiting is in `messages`.
+
+        With until_idle, keeps collecting until Devin stops working: it waits for
+        you, has finished, or the session is suspended. Use it to get the whole
+        answer and not only its first line.
+
+        The result has `status` and `status_detail` (working, waiting_for_user,
+        finished, ...) and `timed_out`. If the session was archived or has ended,
+        the wait stops and the result has `ended`.
+        """
         if not 0 <= timeout_seconds <= 3600 or not 0 < poll_seconds <= 300:
             raise ValueError("timeout_seconds must be 0..3600; poll_seconds must be >0 and <=300")
         deadline = time.monotonic() + timeout_seconds
-        result = await self.read_messages(target=target, account=account, session_id=session_id)
-        while time.monotonic() < deadline:
-            await asyncio.sleep(min(poll_seconds, max(0, deadline - time.monotonic())))
-            result = await self.read_messages(target=target, account=account, session_id=session_id)
-            if result["messages"]:
-                return {**result, "timed_out": False}
-        return {**result, "messages": [], "timed_out": True}
+        held, replied = [], False
+
+        async def read():
+            nonlocal replied
+            result = await self.read_messages(
+                target=target, account=account, session_id=session_id, include_user=True
+            )
+            for message in result["messages"]:
+                replied = message["source"] == "devin"
+                if replied:
+                    held.append(message)
+            return result["account"], result["session_id"]
+
+        while True:
+            # The last read always starts at or after the deadline, however long
+            # the reads before it took.
+            started = time.monotonic()
+            name, sid = await read()
+            try:
+                info = await self.client(name).get_session(sid)
+                reason = ended(info)
+            except DevinAPIError as exc:
+                info, reason = {}, "not found" if exc.status_code in {404, 410} else None
+            except ValueError:
+                info, reason = {}, None
+            if reason and reason != "not found":
+                await read()  # what it said between the read above and its end
+            status, detail = info.get("status"), info.get("status_detail")
+            idle = status == "suspended" or detail in IDLE_DETAILS
+            done = bool(reason) or (replied and (idle or not until_idle))
+            if done or started >= deadline:
+                return {
+                    "account": name,
+                    "session_id": sid,
+                    "messages": held,
+                    "timed_out": not done,
+                    "status": status,
+                    "status_detail": detail,
+                    **({"ended": reason} if reason else {}),
+                }
+            await asyncio.sleep(max(0, min(poll_seconds, deadline - time.monotonic())))

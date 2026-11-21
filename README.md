@@ -114,14 +114,29 @@ Check each key the same way, with its own variable name in the `curl` command.
 * `[targets.<alias>]` supports `account`, exactly one of `session_id` or
   `bot_service_user_id`, and optional `description`. The account can be one from
   the environment.
-* `[accounts.<name>]` supports `org_id`, `api_key_env` (preferred) or `api_key`,
-  and optional `base_url`. If `api_key_env` is set, it takes precedence and must
-  be present and nonempty. File accounts and environment pairs are used
+* `[accounts.<name>]` supports `org_id`, one of `api_key_env`, `api_key_cmd` or
+  `api_key`, and optional `base_url`. `api_key_env` and `api_key_cmd` cannot both
+  be set; either one wins over a literal `api_key` and must give a nonempty key.
+  File accounts and environment pairs are used
   together; the same name in both is an error. One exception: if a file account
   names `DEVIN_API_KEY_<NAME>` as its `api_key_env`, that variable belongs to the
   file account, and a `DEVIN_ORG_ID_<NAME>` beside it is ignored.
 * Never commit real keys; restrict the config with `chmod 600` if it contains
   literal keys. `base_url` receives the bearer key: only use trusted URLs.
+
+**Keys from a command.** `api_key_cmd` fetches the key from a password manager
+or the system keychain when the bridge starts, so the key is in no file and in
+no environment:
+
+```toml
+[accounts.work]
+org_id = "org-for-work"
+api_key_cmd = "security find-generic-password -a me -s devin-work -w"
+```
+
+The command runs without a shell (write it as a string, or as a list of
+arguments), has 30 seconds, and must print the key and nothing else. Use this
+when the environment is unreliable; see the note on the environment in step 3.
 
 Config override: `DEVIN_BRIDGE_CONFIG=/absolute/path/config.toml`. An explicit
 missing file is an error. When the file defines accounts, the unsuffixed
@@ -129,7 +144,21 @@ missing file is an error. When the file defines accounts, the unsuffixed
 
 ### 3. Add the server to Claude Code
 
-Run this in the terminal where the keys are set. One account:
+**The server gets the environment Claude Code was started with**, which is the
+environment of the terminal that started it. A key you export later, a
+`/restart` in an old terminal, or a shell that does not re-read your profile all
+leave the server without a key, and it then fails to connect. If your keys come
+from a profile script, either start Claude Code from a new terminal after every
+change, or avoid the environment: use `api_key_cmd` (step 2) and register the
+server without `-e`:
+
+```sh
+claude mcp add devin-bridge --scope user \
+  -- uvx --from git+https://github.com/codeitlikemiley/devin-claude-bridge devin-claude-bridge
+```
+
+To pass keys through the environment instead, run this in the terminal where the
+keys are set. One account:
 
 ```sh
 claude mcp add devin-bridge --scope user \
@@ -233,14 +262,14 @@ The alias already identifies its account; tool calls use either `target` OR
 | --- | --- |
 | `list_accounts()` | Names, org IDs, and targets; never keys |
 | `list_bots(account)` | Root conversations grouped by service user; newest session ID, title and status per Bot |
-| `list_sessions(account?, active_only=true, limit=20)` | Recent sessions in every account or one, newest activity first: title, status, URL and the targets pinned to each. Active means not archived and not ended; `limit` is per account |
+| `list_sessions(account?, active_only=true, limit=20)` | Recent sessions in every account or one, newest activity first: title, status, URL, the targets pinned to each, and `child_of` for a session another session started. Active means not archived and not ended; `limit` is per account |
 | `create_session(account, prompt, title?, alias?)` | Creates and watches; returns the API session object. With `alias`, the new session becomes that target |
 | `add_target(alias, session, account?, description?)` | Names one session, from its Devin URL or ID. Finds the account, refuses an archived or ended session, watches it from now |
 | `remove_target(alias, unwatch=true)` | Forgets an alias made with `add_target` |
 | `send_message(message, target? / account+session_id)` | Sends and watches; returns the updated API session object. Refuses an archived or ended session |
 | `read_messages(target? / account+session_id, only_new=true, include_user=false)` | Reads every page, returns messages, and advances the shared last-seen position |
-| `wait_for_reply(target? / account+session_id, timeout_seconds=300, poll_seconds=15)` | Marks existing messages seen, then waits for the first batch of new Devin replies; returns `timed_out` |
-| `check_inbox(account?)` | New Devin messages across all watched sessions, grouped by account/session, plus a one-time notice for each target whose session was archived or has ended |
+| `wait_for_reply(target? / account+session_id, timeout_seconds=300, poll_seconds=15, until_idle=false)` | Waits for Devin's reply and returns it with the session's `status` and `status_detail`. Unread replies from before the call count, and nothing is discarded. `until_idle` waits until Devin stops working |
+| `check_inbox(account?)` | New Devin messages across all watched sessions, grouped by account/session, plus a one-time notice for each watched session that was archived, has ended or is gone |
 | `watch_session(target? / account+session_id)` | Starts watching without changing an existing cursor |
 | `unwatch_session(target? / account+session_id)` | Stops watching and forgets the cursor |
 
@@ -270,24 +299,36 @@ same way but is changed there.
   (status `exit` or `error`), nothing is sent, and the error says how to re-point
   the alias and lists the active sessions. A suspended session is fine: Devin
   resumes it when the message arrives.
-* The inbox reads a watched alias session's status before its messages. Once it
-  sees the session archived or ended, it delivers the last unread replies, stops
-  watching the session, and reports the alias once under `notices`. If that last
-  read fails, the watch is kept until a read succeeds, or until Devin says the
-  history is gone as well. The same happens after a refused send, and when you
-  move an alias away from a dead session.
+* The inbox reads the status of every watched session before its messages, in
+  one request per account. Once it sees a session archived, ended or gone, it
+  delivers the last unread replies, stops watching the session, and reports it
+  once under `notices`, with the alias if it has one. If that last read fails,
+  the watch is kept until a read succeeds, or until Devin says the history is
+  gone as well. The same happens after a refused send, and when you move an
+  alias away from a dead session.
 * The bridge never picks a replacement session by itself. Move the alias with
   `add_target` again, or with `create_session(..., alias=...)`.
 
 Targets in `config.toml` are shortcuts, not automatically watched. Watch them
 explicitly or send them a message. First reads/watches include existing history; `only_new=false`
 replays all history. User messages are excluded by default but still advance the
-cursor. `wait_for_reply` deliberately discards previously unread history, including
-replies that arrived before the call: use `read_messages` after sending if you want
-to catch those too. Timeout is 0–3600 seconds; poll interval is >0–300 seconds.
-The initial history fetch and state-lock acquisition may add API latency to a wait.
-There is a final poll at the deadline, even when the timeout is shorter than the
-poll interval; that request can add network latency to the timeout.
+cursor.
+
+**Waiting for a reply.** `wait_for_reply` returns as soon as a Devin message
+follows the latest user message in the session. A reply that arrived before the
+call counts, so a fast answer to a message you just sent is not missed, and
+older unread replies are returned with it, never dropped. The result carries the
+session's `status` and `status_detail`:
+
+* `working`: Devin is still at it; its first message may not be its answer.
+* `waiting_for_user`, `waiting_for_approval`, `finished`: Devin has stopped.
+
+Pass `until_idle=true` to keep collecting until Devin stops, and get the whole
+answer in one call. If the session is archived or ends while you wait, the wait
+stops and the result has `ended`. On a timeout, `timed_out` is true and
+`messages` holds whatever arrived. Each poll is one message read and one status
+read; there is always a last read at the deadline. Timeout is 0–3600 seconds;
+poll interval is >0–300 seconds.
 
 ### Bot targets that survive recycling
 
