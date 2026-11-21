@@ -73,11 +73,17 @@ Check the token from the new terminal. The command reads the variable, so the
 token is not typed again:
 
 ```sh
-curl -s https://api.devin.ai/v3/self -H "Authorization: Bearer $DEVIN_API_KEY"
+curl -sS -w '\nHTTP %{http_code}\n' https://api.devin.ai/v3/self \
+  -H "Authorization: Bearer $DEVIN_API_KEY"
 ```
 
-A JSON description of your user means the token works. `403` with
-`"detail":"Unauthorized"`, or `401`, means the token is wrong or expired.
+The last line is the result:
+
+* `HTTP 200`, after a JSON description of your user: the token works.
+* `HTTP 403` or `HTTP 401`: the token is wrong or expired. Devin answers a bad
+  token with `403` and `"detail":"Unauthorized"`.
+* A line starting with `curl:` and `HTTP 000`: the request never reached Devin.
+  Check your network.
 
 **Several accounts** need a config file. Copy
 [`config.example.toml`](config.example.toml) to
