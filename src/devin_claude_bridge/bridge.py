@@ -762,7 +762,8 @@ class Bridge:
         The result has `status` and `status_detail` (working, waiting_for_user,
         finished, ...) and `timed_out`. If the session was archived or has ended,
         the wait stops and the result has `ended`. If a read fails after replies
-        were collected, they are returned with `error`, not lost.
+        were collected, or the last read of an ended session fails, the result has
+        `error` and the replies collected so far.
         """
         if not 0 <= timeout_seconds <= 3600 or not 0 < poll_seconds <= 300:
             raise ValueError("timeout_seconds must be 0..3600; poll_seconds must be >0 and <=300")
@@ -771,7 +772,7 @@ class Bridge:
         name = sid = answered = None
         info, reason = {}, None
 
-        async def read():
+        async def read(bootstrap=True):
             """Read what is unread; say whether Devin answered the latest user message."""
             nonlocal name, sid, answered
             result = await self.read_messages(
@@ -787,8 +788,13 @@ class Bridge:
                 # they are not the answer of the conversation being waited on.
                 if message.get("session_id", sid) == sid:
                     answered = message["source"] == "devin"
-            if answered is None:
-                answered = await self._answered(name, sid)
+            if answered is None and bootstrap:
+                answered, from_history = await self._answered(name, sid)
+                if from_history:
+                    # A reply may have arrived between the read above and that look
+                    # at the history. Read again, so a reply that was counted is
+                    # also in the result.
+                    await read(bootstrap=False)
 
         def result(done, error=None):
             return {
@@ -821,27 +827,31 @@ class Bridge:
                 info, reason = {}, "not found" if exc.status_code in {404, 410} else None
             except ValueError:
                 info, reason = {}, None
+            failed = None
             if reason and reason != "not found":
                 try:
                     await read()  # what it said between the read above and its end
-                except ValueError:
-                    pass
+                except ValueError as exc:
+                    failed = str(exc)
             idle = info.get("status") == "suspended" or info.get("status_detail") in IDLE_DETAILS
             done = bool(reason) or bool(answered and (idle if until_idle else held))
             if done or started >= deadline:
-                return result(done)
+                return result(done, failed)
             await asyncio.sleep(max(0, min(poll_seconds, deadline - time.monotonic())))
 
     async def _answered(self, account, sid):
-        """Whether Devin answered the latest user message, when nothing unread shows it."""
+        """Whether Devin answered the latest user message, when nothing unread shows it.
+
+        Returns the answer and whether it came from a fresh look at the history.
+        """
         async with self.state.transaction() as data:
             known = data.get(account, {}).get(sid, {}).get("answered")
         if known is not None:
-            return known
+            return known, False
         # Never recorded for this session: look at the end of its history once.
         items, _ = await self.client(account).messages(sid)
         known = bool(items) and items[-1]["source"] == "devin"
         async with self.state.transaction() as data:
             if sid in data.get(account, {}):
                 data[account][sid].setdefault("answered", known)
-        return known
+        return known, True

@@ -187,8 +187,47 @@ async def test_a_session_the_bridge_never_read_is_looked_up_once(tmp_path, org):
         account="work", session_id="fresh", until_idle=True, timeout_seconds=0.02, poll_seconds=0.01
     )
     assert not result["timed_out"] and result["messages"] == []
-    assert [c for c in org.calls if c[0] == "messages"] == [("messages", "devin-fresh")] * 2
+    # the unread read, one look at the history, and the read that follows it
+    assert [c for c in org.calls if c[0] == "messages"] == [("messages", "devin-fresh")] * 3
+    org.calls.clear()
+    await bridge.wait_for_reply(
+        account="work", session_id="fresh", until_idle=True, timeout_seconds=0, poll_seconds=0.01
+    )
+    assert [c for c in org.calls if c[0] == "messages"] == [("messages", "devin-fresh")]
     assert json.loads(bridge.state.path.read_text())["work"]["devin-fresh"]["answered"] is True
+
+
+async def test_a_reply_seen_while_looking_up_history_is_in_the_result(tmp_path, org):
+    session = org.add("fresh", status_detail="working")
+    bridge = make(tmp_path, {"work": org})
+    await bridge.watch_session(account="work", session_id="fresh")
+
+    async def answers_during_the_history_lookup(count):
+        if count == 2:
+            org.say("fresh", "Done")
+            session["status_detail"] = "finished"
+
+    org.on_read = answers_during_the_history_lookup
+    result = await bridge.wait_for_reply(
+        account="work", session_id="fresh", until_idle=True, timeout_seconds=1, poll_seconds=0.01
+    )
+    assert texts(result) == ["Done"] and not result["timed_out"]
+    assert org.reads == 3
+    assert await bridge.check_inbox() == {"sessions": []}
+
+
+async def test_a_failed_last_read_of_an_ended_session_is_reported(bridge, org):
+    async def ends_then_breaks(count):
+        if count == 2:
+            org.say("task", "goodbye")
+            org.sessions["devin-task"]["status"] = "exit"
+        if count == 3:
+            raise DevinAPIError(500, "Devin API 500: try later")
+
+    org.on_read = ends_then_breaks
+    result = await wait(bridge, timeout_seconds=30)
+    assert result["ended"] == "ended" and "500" in result["error"]
+    assert texts(result) == ["goodbye"] and not result["timed_out"]
 
 
 async def test_wait_errors(bridge, org):
