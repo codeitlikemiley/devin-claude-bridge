@@ -1,5 +1,6 @@
 import asyncio
 import time
+from copy import deepcopy
 
 from .client import DevinAPIError, DevinClient
 from .config import session_id as normalize
@@ -46,7 +47,7 @@ class Bridge:
                 )
         return {"account": account, "bots": list(bots.values())}
 
-    async def _resolve(self, data, target, account, session_id, force=False):
+    async def _resolve(self, data, target, account, session_id, force=False, readable=False):
         account, sid = self.config.resolve(target, account, session_id)
         entry = self.config.targets.get(target, {})
         bot = entry.get("bot_service_user_id")
@@ -54,41 +55,75 @@ class Bridge:
             return account, sid
         sessions = data.setdefault(account, {})
         cached = next((s for s, p in sessions.items() if target in p.get("targets", [])), None)
+        terminal = False
         if cached and not force:
             try:
                 session = await self.client(account).get_session(cached)
                 if session["status"] not in {"exit", "error"} and not session.get("is_archived"):
                     return account, cached
+                terminal = True
             except DevinAPIError as exc:
                 if exc.status_code not in {404, 410}:
                     raise
         roots = await self.client(account).root_sessions(bot)
         roots = [s for s in roots if s["status"] not in {"exit", "error"}]
         if not roots:
+            if cached and terminal and readable:
+                return account, cached
             raise ValueError(f"Bot target {target}: no active root conversation found")
         sid = normalize(max(roots, key=lambda s: s["created_at"])["session_id"])
         if cached and cached != sid:
             previous = sessions[cached]
             previous["targets"].remove(target)
-            if not previous["targets"] and not previous.get("direct", False):
-                del sessions[cached]
         position = sessions.setdefault(sid, {"cursor": None, "event_id": None, "direct": False})
         position.setdefault("direct", not position.get("targets"))
+        if cached and cached != sid:
+            pending = position.setdefault("previous_sessions", [])
+            for previous_sid in [*sessions[cached].get("previous_sessions", []), cached]:
+                if previous_sid not in pending and previous_sid != sid:
+                    pending.append(previous_sid)
         if target not in position.setdefault("targets", []):
             position["targets"].append(target)
         return account, sid
 
-    async def _operate(self, data, target, account, session_id, operation):
-        name, sid = await self._resolve(data, target, account, session_id)
+    async def _operate(self, data, target, account, session_id, operation, readable=False):
+        unavailable = set()
+
+        async def run(name, sid):
+            if not readable:
+                return await operation(name, sid)
+            sessions = data.setdefault(name, {})
+            position = sessions.get(sid, {})
+            messages = []
+            pending = list(position.get("previous_sessions", []))
+            for previous_sid in pending:
+                if previous_sid in unavailable:
+                    continue
+                try:
+                    replies = await operation(name, previous_sid)
+                    messages.extend({**m, "session_id": previous_sid} for m in replies)
+                except DevinAPIError as exc:
+                    if exc.status_code not in {404, 410}:
+                        raise
+            messages.extend(await operation(name, sid))
+            position.pop("previous_sessions", None)
+            for previous_sid in pending:
+                previous = sessions.get(previous_sid, {})
+                if not previous.get("targets") and not previous.get("direct", False):
+                    sessions.pop(previous_sid, None)
+            return messages
+
+        name, sid = await self._resolve(data, target, account, session_id, readable=readable)
         try:
-            return name, sid, await operation(name, sid)
+            return name, sid, await run(name, sid)
         except DevinAPIError as exc:
             if exc.status_code not in {404, 410} or not self.config.targets.get(target, {}).get(
                 "bot_service_user_id"
             ):
                 raise
+            unavailable.add(sid)
         name, sid = await self._resolve(data, target, account, session_id, force=True)
-        return name, sid, await operation(name, sid)
+        return name, sid, await run(name, sid)
 
     async def create_session(self, account: str, prompt: str, title: str | None = None):
         """Create and automatically watch a new Devin session."""
@@ -187,6 +222,7 @@ class Bridge:
                 account,
                 session_id,
                 lambda name, sid: self._read(data, name, sid, only_new, include_user),
+                readable=True,
             )
             if not self.config.targets.get(target, {}).get("bot_service_user_id"):
                 data[account][sid]["direct"] = True
@@ -208,15 +244,18 @@ class Bridge:
                         work.append((None, name, sid))
             for target, name, sid in work:
                 group = {"target": target} if target else {"account": name, "session_id": sid}
+                before = deepcopy(data)
                 try:
                     name, sid, messages = await self._operate(
-                        data, target, name, sid, lambda n, s: self._read(data, n, s)
+                        data, target, name, sid, lambda n, s: self._read(data, n, s), readable=True
                     )
                     if messages:
                         groups.append(
                             {**group, "account": name, "session_id": sid, "messages": messages}
                         )
                 except ValueError as exc:
+                    data.clear()
+                    data.update(before)
                     groups.append({**group, "error": str(exc)})
         return {"sessions": groups}
 

@@ -157,6 +157,43 @@ async def test_suspended_does_not_resolve_again_and_403_not_retried(bridge):
     assert client.send_message.await_count == 1
 
 
+@pytest.mark.parametrize("successor", [True, False])
+@pytest.mark.parametrize("inbox", [True, False])
+async def test_final_reply_survives_termination(bridge, successor, inbox):
+    await bridge.watch_session(target="bot")
+    client = bridge.clients["one"]
+    client.get_session.return_value = root("old", status="exit")
+    client.root_sessions.return_value = [root("new", 2)] if successor else []
+
+    async def messages(sid, after):
+        if sid == "devin-old" and after is None:
+            return ([{"event_id": "final", "source": "devin"}], "final-cursor")
+        return ([], after)
+
+    client.messages.side_effect = messages
+    result = await bridge.check_inbox() if inbox else await bridge.read_messages(target="bot")
+    replies = result["sessions"][0]["messages"] if inbox else result["messages"]
+    assert [m["event_id"] for m in replies] == ["final"]
+    again = await bridge.check_inbox()
+    assert again == {"sessions": []}
+
+
+async def test_send_migration_keeps_old_reply_for_next_inbox(bridge):
+    await bridge.watch_session(target="bot")
+    client = bridge.clients["one"]
+    client.get_session.return_value = root("old", status="exit")
+    client.root_sessions.return_value = [root("new", 2)]
+    await bridge.send_message("next", target="bot")
+    client.get_session.return_value = root("new", 2)
+    client.messages.side_effect = [
+        ([{"event_id": "final", "source": "devin"}], "old-last"),
+        ([], None),
+    ]
+    result = await bridge.check_inbox()
+    assert result["sessions"][0]["messages"][0]["event_id"] == "final"
+    assert result["sessions"][0]["messages"][0]["session_id"] == "devin-old"
+
+
 async def test_list_bots_grouped_newest_and_empty(bridge):
     client = bridge.clients["one"]
     client.root_sessions.return_value = [
