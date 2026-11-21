@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 from devin_claude_bridge.config import load_config, session_id
@@ -202,6 +204,55 @@ def test_targets_file_with_env_accounts_only(monkeypatch, tmp_path):
     pair(monkeypatch, "WORK")
     config = load_config()
     assert config.targets["bot"]["account"] == "work"
+
+
+def cmd_config(monkeypatch, tmp_path, line):
+    path = tmp_path / "config.toml"
+    path.write_text(f'[accounts.work]\norg_id = "org-work"\n{line}\n')
+    monkeypatch.setenv("DEVIN_BRIDGE_CONFIG", str(path))
+    return path
+
+
+def test_api_key_from_a_command(monkeypatch, tmp_path):
+    python = sys.executable
+    cmd_config(monkeypatch, tmp_path, f'api_key_cmd = "{python} -c \'print(\\"from-cmd\\")\'"')
+    config = load_config()
+    assert config.accounts["work"].api_key == "from-cmd"
+    assert "from-cmd" not in repr(config)
+    cmd_config(monkeypatch, tmp_path, f'api_key_cmd = ["{python}", "-c", "print(42)"]')
+    assert load_config().accounts["work"].api_key == "42"
+    cmd_config(
+        monkeypatch,
+        tmp_path,
+        f'api_key_cmd = ["{python}", "-c", "import sys; print(repr(sys.stdin.read()))"]',
+    )
+    assert load_config().accounts["work"].api_key == "''"
+
+
+@pytest.mark.parametrize(
+    "code,error",
+    [
+        ("import sys; print('locked', file=sys.stderr); sys.exit(3)", "exited with 3: locked"),
+        ("pass", "must print the key and nothing else"),
+        ("print('a'); print('b')", "must print the key and nothing else"),
+    ],
+)
+def test_api_key_command_failures(monkeypatch, tmp_path, code, error):
+    cmd_config(monkeypatch, tmp_path, f'api_key_cmd = ["{sys.executable}", "-c", "{code}"]')
+    with pytest.raises(ValueError, match=f"work: api_key_cmd {error}"):
+        load_config()
+
+
+def test_api_key_command_config_errors(monkeypatch, tmp_path):
+    cmd_config(monkeypatch, tmp_path, 'api_key_cmd = "no-such-command-here get X"')
+    with pytest.raises(ValueError, match="command not found: no-such-command-here"):
+        load_config()
+    cmd_config(monkeypatch, tmp_path, 'api_key_cmd = "x"\napi_key_env = "Y"')
+    with pytest.raises(ValueError, match="api_key_env or api_key_cmd, not both"):
+        load_config()
+    cmd_config(monkeypatch, tmp_path, "api_key_cmd = []")
+    with pytest.raises(ValueError, match="missing API key"):
+        load_config()
 
 
 @pytest.mark.parametrize("sid", ["", "../evil", "devin-", "abc?x=1"])
