@@ -273,8 +273,9 @@ same way but is changed there.
 * The inbox reads a watched alias session's status before its messages. Once it
   sees the session archived or ended, it delivers the last unread replies, stops
   watching the session, and reports the alias once under `notices`. If that last
-  read fails, the watch is kept until a read succeeds. The same happens after a
-  refused send, and when you move an alias away from a dead session.
+  read fails, the watch is kept until a read succeeds, or until Devin says the
+  history is gone as well. The same happens after a refused send, and when you
+  move an alias away from a dead session.
 * The bridge never picks a replacement session by itself. Move the alias with
   `add_target` again, or with `create_session(..., alias=...)`.
 

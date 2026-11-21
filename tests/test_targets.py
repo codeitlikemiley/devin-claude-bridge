@@ -17,6 +17,7 @@ class Org:
         self.sent = []
         self.calls = []
         self.down = False
+        self.status_gone = set()
 
     def add(self, sid, **fields):
         self.sessions[f"devin-{sid}"] = {
@@ -44,6 +45,8 @@ class Org:
 
     async def get_session(self, sid):
         self.calls.append(("get", sid))
+        if sid in self.status_gone:
+            raise DevinAPIError(410, "Devin API 410: Session unavailable")
         return {k: v for k, v in self._get(sid).items() if k != "messages"}
 
     async def recent_sessions(self, active_only=True):
@@ -219,6 +222,8 @@ async def test_inbox_notices_a_deleted_alias_session_and_keeps_others(tmp_path, 
     first = await bridge.check_inbox()
     assert first["notices"][0]["target"] == "filed"
     assert first["notices"][0]["reason"] == "not found"
+    assert first["sessions"] == []
+    assert json.loads(bridge.state.path.read_text())["work"] == {}
     assert "hexuria" in json.loads(bridge.state.path.read_text())
     second = await bridge.check_inbox()
     assert second == {"sessions": []}
@@ -268,7 +273,12 @@ async def test_repointing_delivers_the_old_sessions_last_reply_before_dropping_i
     del orgs["hexuria"].sessions["devin-third"]
     orgs["hexuria"].add("fourth")
     gone = await bridge.add_target("hexuria", "fourth")
-    assert gone["replaced"]["watch"] == "removed"
+    assert gone["replaced"]["watch"] == "ends after its last replies are read"
+    assert await bridge.check_inbox() == {"sessions": []}
+    assert set(json.loads(bridge.state.path.read_text())["hexuria"]) == {
+        "devin-new",
+        "devin-fourth",
+    }
 
 
 async def test_a_send_goes_to_the_session_that_passed_the_check(bridge, orgs):
@@ -316,6 +326,31 @@ async def test_an_unarchived_session_is_watched_again_after_a_send(bridge, orgs)
     await bridge.send_message("back", target="hexuria")
     await bridge.check_inbox()
     assert "devin-task" in json.loads(bridge.state.path.read_text())["hexuria"]
+
+
+async def test_a_status_error_does_not_hide_replies_that_can_still_be_read(bridge, orgs):
+    orgs["hexuria"].add("task")
+    await bridge.add_target("hexuria", "task")
+    orgs["hexuria"].say("task", "still readable")
+    orgs["hexuria"].status_gone.add("devin-task")
+    inbox = await bridge.check_inbox()
+    assert [m["message"] for m in inbox["sessions"][0]["messages"]] == ["still readable"]
+    assert inbox["notices"][0]["reason"] == "not found"
+    assert json.loads(bridge.state.path.read_text())["hexuria"] == {}
+
+
+async def test_re_adding_a_revived_session_keeps_its_watch(bridge, orgs):
+    session = orgs["hexuria"].add("task")
+    await bridge.add_target("task", "task")
+    session["is_archived"] = True
+    with pytest.raises(ValueError):
+        await bridge.send_message("x", target="task")
+    session["is_archived"] = False
+    assert (await bridge.add_target("task", "task"))["watched"] is True
+    assert await bridge.check_inbox() == {"sessions": []}
+    orgs["hexuria"].say("task", "after the revival")
+    inbox = await bridge.check_inbox()
+    assert [m["message"] for m in inbox["sessions"][0]["messages"]] == ["after the revival"]
 
 
 async def test_inbox_does_not_ask_about_aliases_it_does_not_watch(tmp_path, orgs):

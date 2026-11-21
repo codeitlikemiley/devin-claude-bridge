@@ -216,10 +216,7 @@ class Bridge:
             except ValueError:
                 dead = None
             async with self.state.transaction() as data:
-                if dead == "not found":
-                    self._drop_watch(data, old_account, old_sid)
-                    watch = "removed"
-                elif dead and old_sid in data.get(old_account, {}):
+                if dead and old_sid in data.get(old_account, {}):
                     data[old_account][old_sid]["retire"] = True
                     watch = "ends after its last replies are read"
         return {"account": old_account, "session_id": old_sid, "watch": watch}
@@ -270,7 +267,10 @@ class Bridge:
                 last = items[-1]["event_id"] if items else None
                 data[name][sid] = {"cursor": cursor, "event_id": last, "direct": True}
             else:
+                # The session was just seen alive, so an earlier mark to end its
+                # watch no longer applies.
                 position["direct"] = True
+                position.pop("retire", None)
         replaced = await self._point(alias, name, sid, info, description)
         return {
             "target": alias,
@@ -570,6 +570,7 @@ class Bridge:
         skipped = []
         notices = []
         newly_stale = {}
+        gone = set()
         async with self.state.transaction() as data:
             # A session's status is read before its messages, so the read that
             # follows covers everything a session seen as archived or ended said.
@@ -594,10 +595,7 @@ class Bridge:
                     info, reason = answer, ended(answer)
                 if not reason:
                     continue
-                if reason == "not found":
-                    self._drop_watch(data, name, sid)
-                elif sid in data.get(name, {}):
-                    data[name][sid]["retire"] = True
+                data[name][sid]["retire"] = True
                 newly_stale[alias] = {"session_id": sid, "reason": reason}
                 named = _named(info)
                 notices.append(
@@ -651,15 +649,27 @@ class Bridge:
                     data.clear()
                     data.update(before)
                     groups.append({**group, "error": str(exc)})
-            # A watch marked to end goes once its last replies were read without error.
+                    unreadable = isinstance(exc, DevinAPIError) and exc.status_code in {404, 410}
+                    if unreadable and not target:
+                        gone.add((name, sid))
+            # A watch marked to end goes once its last replies were read, or once
+            # Devin says its history is gone too. Any other failed read keeps it.
             failed = {(g.get("account"), g.get("session_id")) for g in groups if "error" in g}
             for name, sessions in data.items():
                 for sid, position in list(sessions.items()):
                     if not position.get("retire") or (account and name != account):
                         continue
-                    if (name, sid) not in failed:
-                        del position["retire"]
-                        self._drop_watch(data, name, sid)
+                    if (name, sid) in gone:
+                        groups[:] = [
+                            g
+                            for g in groups
+                            if "error" not in g
+                            or (g.get("account"), g.get("session_id")) != (name, sid)
+                        ]
+                    elif (name, sid) in failed:
+                        continue
+                    del position["retire"]
+                    self._drop_watch(data, name, sid)
         if newly_stale:
             with self.store.edit() as saved:
                 saved["stale"].update(newly_stale)
