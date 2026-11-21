@@ -323,6 +323,9 @@ session's `status` and `status_detail`:
 * `working`: Devin is still at it; its first message may not be its answer.
 * `waiting_for_user`, `waiting_for_approval`, `finished`: Devin has stopped.
 
+In a session where other people or agents also post, their newer message is the
+latest user message, so the wait is then for Devin's answer to that one.
+
 Pass `until_idle=true` to keep collecting until Devin stops, and get the whole
 answer in one call. If the session is archived or ends while you wait, the wait
 stops and the result has `ended`. On a timeout, `timed_out` is true and
