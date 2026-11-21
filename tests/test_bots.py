@@ -270,6 +270,21 @@ async def test_retry_does_not_consume_drained_predecessor_reply(bridge):
     assert result["session_id"] == "devin-replacement"
 
 
+async def test_explicit_session_read_does_not_drain_bot_predecessors(bridge):
+    await bridge.watch_session(target="bot")
+    client = bridge.clients["one"]
+    client.get_session.return_value = root("old", status="exit")
+    client.root_sessions.return_value = [root("new", 2)]
+    await bridge.send_message("next", target="bot")
+    client.messages.return_value = ([{"event_id": "current", "source": "devin"}], "cursor-new")
+    result = await bridge.read_messages(account="one", session_id="new")
+    assert result["messages"] == [{"event_id": "current", "source": "devin"}]
+    client.messages.assert_awaited_once_with("devin-new", None)
+    state = json.loads(bridge.state.path.read_text())["one"]
+    assert state["devin-old"]["cursor"] is None
+    assert state["devin-new"]["previous_sessions"] == ["devin-old"]
+
+
 async def test_list_bots_grouped_newest_and_empty(bridge):
     client = bridge.clients["one"]
     client.root_sessions.return_value = [

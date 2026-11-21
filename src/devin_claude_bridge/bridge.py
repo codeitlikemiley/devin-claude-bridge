@@ -98,7 +98,7 @@ class Bridge:
         unavailable = set()
 
         async def run(name, sid):
-            if not readable:
+            if not readable or not self.config.targets.get(target, {}).get("bot_service_user_id"):
                 return await operation(name, sid)
             sessions = data.setdefault(name, {})
             position = sessions.get(sid, {})
