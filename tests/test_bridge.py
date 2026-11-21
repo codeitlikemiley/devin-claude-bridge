@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import json
 from unittest.mock import AsyncMock
 
@@ -152,5 +153,7 @@ async def test_tools_registered(bridge):
         "watch_session",
         "unwatch_session",
     }
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("mcp.server.lowlevel.server").level == logging.WARNING
     schemas = {t.name: t.inputSchema for t in tools}
     assert schemas["send_message"]["required"] == ["message"]
