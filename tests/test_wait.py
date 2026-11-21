@@ -1,7 +1,10 @@
 import asyncio
+import json
 
 import pytest
 from fake import Org, make
+
+from devin_claude_bridge.client import DevinAPIError
 
 
 @pytest.fixture
@@ -10,9 +13,13 @@ def org():
 
 
 @pytest.fixture
-def bridge(tmp_path, org):
+async def bridge(tmp_path, org):
     org.add("task")
-    return make(tmp_path, {"work": org})
+    bridge = make(tmp_path, {"work": org})
+    await bridge.add_target("task", "task")
+    org.reads = 0
+    org.calls.clear()
+    return bridge
 
 
 def wait(bridge, **options):
@@ -131,6 +138,57 @@ async def test_the_wait_stops_when_the_session_ends(bridge, org, field, value, r
     result = await wait(bridge, timeout_seconds=30, poll_seconds=0.01)
     assert result["ended"] == reason and not result["timed_out"]
     assert texts(result) == ["goodbye"]
+
+
+async def test_replies_collected_before_a_failed_read_are_returned_not_lost(bridge, org):
+    session = org.sessions["devin-task"]
+    session["status_detail"] = "working"
+    await bridge.send_message("run them", account="work", session_id="task")
+    org.say("task", "Running tests.")
+
+    async def gone_on_the_second_read(count):
+        if count == 2:
+            raise DevinAPIError(500, "Devin API 500: try later")
+
+    org.on_read = gone_on_the_second_read
+    result = await wait(bridge, until_idle=True)
+    assert texts(result) == ["Running tests."]
+    assert "500" in result["error"] and not result["timed_out"]
+    assert await bridge.check_inbox() == {"sessions": []}
+
+
+async def test_until_idle_right_after_a_plain_wait_sees_devin_finished(bridge, org):
+    session = org.sessions["devin-task"]
+    session["status_detail"] = "working"
+    await bridge.send_message("question", account="work", session_id="task")
+    org.say("task", "the answer")
+    assert texts(await wait(bridge)) == ["the answer"]
+    session["status_detail"] = "finished"
+    org.reads = 0
+    result = await wait(bridge, until_idle=True)
+    assert result["messages"] == [] and not result["timed_out"]
+    assert result["status_detail"] == "finished" and org.reads == 1
+    await bridge.send_message("another", account="work", session_id="task")
+    unanswered = await wait(bridge, until_idle=True, timeout_seconds=0.03)
+    assert unanswered["timed_out"]
+
+
+async def test_a_session_the_bridge_never_read_is_looked_up_once(tmp_path, org):
+    org.add("fresh", status_detail="finished")
+    org.say("fresh", "all done")
+    bridge = make(tmp_path, {"work": org})
+    await bridge.watch_session(account="work", session_id="fresh")
+    await bridge.read_messages(account="work", session_id="fresh")
+    state = json.loads(bridge.state.path.read_text())
+    del state["work"]["devin-fresh"]["answered"]  # as a state file from before this field
+    bridge.state.path.write_text(json.dumps(state))
+    org.calls.clear()
+    result = await bridge.wait_for_reply(
+        account="work", session_id="fresh", until_idle=True, timeout_seconds=0.02, poll_seconds=0.01
+    )
+    assert not result["timed_out"] and result["messages"] == []
+    assert [c for c in org.calls if c[0] == "messages"] == [("messages", "devin-fresh")] * 2
+    assert json.loads(bridge.state.path.read_text())["work"]["devin-fresh"]["answered"] is True
 
 
 async def test_wait_errors(bridge, org):

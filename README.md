@@ -137,6 +137,9 @@ api_key_cmd = "security find-generic-password -a me -s devin-work -w"
 The command runs without a shell (write it as a string, or as a list of
 arguments), has 30 seconds, and must print the key and nothing else. Use this
 when the environment is unreliable; see the note on the environment in step 3.
+If the same account name is also exported as a `DEVIN_API_KEY_<NAME>` pair, the
+bridge stops with a duplicate-account error: remove those exports when you move
+an account to `api_key_cmd`.
 
 Config override: `DEVIN_BRIDGE_CONFIG=/absolute/path/config.toml`. An explicit
 missing file is an error. When the file defines accounts, the unsuffixed
@@ -326,8 +329,10 @@ session's `status` and `status_detail`:
 In a session where other people or agents also post, their newer message is the
 latest user message, so the wait is then for Devin's answer to that one.
 
-Pass `until_idle=true` to keep collecting until Devin stops, and get the whole
-answer in one call. If the session is archived or ends while you wait, the wait
+Pass `until_idle=true` to keep collecting until Devin has answered and stopped,
+and get the whole answer in one call; if Devin already answered and is idle, it
+returns at once. If a read fails after replies were collected, they are returned
+with `error` and not lost. If the session is archived or ends while you wait, the wait
 stops and the result has `ended`. On a timeout, `timed_out` is true and
 `messages` holds whatever arrived. Each poll is one message read and one status
 read; there is always a last read at the deadline. Timeout is 0–3600 seconds;
@@ -443,6 +448,9 @@ The wrapper does four things:
 * If the command itself fails, for example it is not on `PATH` or a key is
   missing, the wrapper tells Claude so. A broken hook does not look like an empty
   inbox.
+
+A key command (`api_key_cmd`) runs before the inbox is read and counts against
+the hook's `timeout`. If yours is slow, raise the timeout.
 
 The hook reads the same keys, config and state as the MCP server, and the two
 share what counts as read: a message the hook showed is not new to

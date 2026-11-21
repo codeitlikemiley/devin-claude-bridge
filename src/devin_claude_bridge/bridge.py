@@ -129,23 +129,33 @@ class Bridge:
     async def _dead(self, account, sids):
         """Which of these sessions are archived, ended or gone: {sid: (session, reason)}."""
         client = self.client(account)
-        found = await client.sessions_by_id(sids)
+        try:
+            found = await client.sessions_by_id(sids)
+        except DevinAPIError as exc:
+            # A key that may read sessions but not list them: ask one by one.
+            if exc.status_code != 403:
+                raise
+            found = {}
+
+        async def one(sid):
+            # Absent from the list. Ask for it by itself before calling it gone.
+            try:
+                return await client.get_session(sid)
+            except DevinAPIError as exc:
+                return "not found" if exc.status_code in {404, 410} else None
+            except ValueError:
+                return None
+
+        missing = [sid for sid in sids if sid not in found]
+        for sid, answer in zip(missing, await asyncio.gather(*(one(sid) for sid in missing))):
+            found[sid] = answer
         dead = {}
         for sid in sids:
-            info = found.get(sid)
-            if info is None:
-                # Absent from the list. Ask for it by itself before calling it gone.
-                try:
-                    info = await client.get_session(sid)
-                except DevinAPIError as exc:
-                    if exc.status_code in {404, 410}:
-                        dead[sid] = ({}, "not found")
-                    continue
-                except ValueError:
-                    continue
-            reason = ended(info)
-            if reason:
-                dead[sid] = (info, reason)
+            info = found[sid]
+            if info == "not found":
+                dead[sid] = ({}, "not found")
+            elif info is not None and ended(info):
+                dead[sid] = (info, ended(info))
         return dead
 
     @staticmethod
@@ -292,8 +302,12 @@ class Bridge:
             position = data.setdefault(name, {}).get(sid)
             if position is None:
                 items, cursor = await self.client(name).messages(sid)
-                last = items[-1]["event_id"] if items else None
-                data[name][sid] = {"cursor": cursor, "event_id": last, "direct": True}
+                data[name][sid] = {
+                    "cursor": cursor,
+                    "event_id": items[-1]["event_id"] if items else None,
+                    "direct": True,
+                    "answered": bool(items) and items[-1]["source"] == "devin",
+                }
             else:
                 # The session was just seen alive, so an earlier mark to end its
                 # watch no longer applies.
@@ -538,6 +552,7 @@ class Bridge:
                 sid, {"cursor": None, "event_id": None}
             )
             position.pop("retire", None)
+            position["answered"] = False
             if not self.config.targets.get(target, {}).get("bot_service_user_id"):
                 position["direct"] = True
         return result
@@ -558,6 +573,9 @@ class Bridge:
             position["cursor"] = cursor
         if items:
             position["event_id"] = items[-1]["event_id"]
+            # Whether Devin has answered the latest user message, kept because the
+            # messages that show it stop being unread once they are read.
+            position["answered"] = items[-1]["source"] == "devin"
         return [m for m in items if include_user or m["source"] == "devin"]
 
     async def read_messages(
@@ -736,35 +754,66 @@ class Bridge:
         just sent is not missed. Nothing is discarded: every unread Devin message
         read while waiting is in `messages`.
 
-        With until_idle, keeps collecting until Devin stops working: it waits for
-        you, has finished, or the session is suspended. Use it to get the whole
-        answer and not only its first line.
+        With until_idle, keeps collecting until Devin has answered and stops
+        working: it waits for you, has finished, or the session is suspended. Use
+        it to get the whole answer and not only its first line. If Devin already
+        answered and is idle, it returns at once.
 
         The result has `status` and `status_detail` (working, waiting_for_user,
         finished, ...) and `timed_out`. If the session was archived or has ended,
-        the wait stops and the result has `ended`.
+        the wait stops and the result has `ended`. If a read fails after replies
+        were collected, they are returned with `error`, not lost.
         """
         if not 0 <= timeout_seconds <= 3600 or not 0 < poll_seconds <= 300:
             raise ValueError("timeout_seconds must be 0..3600; poll_seconds must be >0 and <=300")
         deadline = time.monotonic() + timeout_seconds
-        held, replied = [], False
+        held = []
+        name = sid = answered = None
+        info, reason = {}, None
 
         async def read():
-            nonlocal replied
+            """Read what is unread; say whether Devin answered the latest user message."""
+            nonlocal name, sid, answered
             result = await self.read_messages(
                 target=target, account=account, session_id=session_id, include_user=True
             )
+            if (name, sid) != (result["account"], result["session_id"]):
+                # A Bot target moved to a new conversation: nothing is answered there yet.
+                name, sid, answered = result["account"], result["session_id"], None
             for message in result["messages"]:
-                replied = message["source"] == "devin"
-                if replied:
+                if message["source"] == "devin":
                     held.append(message)
-            return result["account"], result["session_id"]
+                # Replies drained from a Bot's earlier conversation are returned, but
+                # they are not the answer of the conversation being waited on.
+                if message.get("session_id", sid) == sid:
+                    answered = message["source"] == "devin"
+            if answered is None:
+                answered = await self._answered(name, sid)
+
+        def result(done, error=None):
+            return {
+                "account": name,
+                "session_id": sid,
+                "messages": held,
+                "timed_out": not done,
+                "status": info.get("status"),
+                "status_detail": info.get("status_detail"),
+                **({"ended": reason} if reason else {}),
+                **({"error": error} if error else {}),
+            }
 
         while True:
             # The last read always starts at or after the deadline, however long
             # the reads before it took.
             started = time.monotonic()
-            name, sid = await read()
+            try:
+                await read()
+            except ValueError as exc:
+                if not held:
+                    raise
+                # The replies read so far are no longer unread: hand them over
+                # with the error, so they are not lost.
+                return result(True, str(exc))
             try:
                 info = await self.client(name).get_session(sid)
                 reason = ended(info)
@@ -773,18 +822,26 @@ class Bridge:
             except ValueError:
                 info, reason = {}, None
             if reason and reason != "not found":
-                await read()  # what it said between the read above and its end
-            status, detail = info.get("status"), info.get("status_detail")
-            idle = status == "suspended" or detail in IDLE_DETAILS
-            done = bool(reason) or (replied and (idle or not until_idle))
+                try:
+                    await read()  # what it said between the read above and its end
+                except ValueError:
+                    pass
+            idle = info.get("status") == "suspended" or info.get("status_detail") in IDLE_DETAILS
+            done = bool(reason) or bool(answered and (idle if until_idle else held))
             if done or started >= deadline:
-                return {
-                    "account": name,
-                    "session_id": sid,
-                    "messages": held,
-                    "timed_out": not done,
-                    "status": status,
-                    "status_detail": detail,
-                    **({"ended": reason} if reason else {}),
-                }
+                return result(done)
             await asyncio.sleep(max(0, min(poll_seconds, deadline - time.monotonic())))
+
+    async def _answered(self, account, sid):
+        """Whether Devin answered the latest user message, when nothing unread shows it."""
+        async with self.state.transaction() as data:
+            known = data.get(account, {}).get(sid, {}).get("answered")
+        if known is not None:
+            return known
+        # Never recorded for this session: look at the end of its history once.
+        items, _ = await self.client(account).messages(sid)
+        known = bool(items) and items[-1]["source"] == "devin"
+        async with self.state.transaction() as data:
+            if sid in data.get(account, {}):
+                data[account][sid].setdefault("answered", known)
+        return known

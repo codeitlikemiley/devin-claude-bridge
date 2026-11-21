@@ -16,6 +16,7 @@ class Org:
         self.down = False
         self.status_gone = set()
         self.status_down = False
+        self.status_denied = False
         self.on_read = None
         self.reads = 0
 
@@ -51,6 +52,8 @@ class Org:
 
     async def sessions_by_id(self, sids):
         self.calls.append(("status", tuple(sids)))
+        if self.status_denied:
+            raise DevinAPIError(403, "Devin API 403: Forbidden (check permissions)")
         if self.down or self.status_down:
             raise DevinAPIError(500, "Devin API 500: down")
         rows = {sid: self.sessions[sid] for sid in sids if sid in self.sessions}

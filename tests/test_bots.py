@@ -181,6 +181,26 @@ async def test_final_reply_survives_termination(bridge, successor, inbox):
     assert again == {"sessions": []}
 
 
+async def test_a_wait_does_not_take_the_old_conversations_reply_for_an_answer(bridge):
+    await bridge.watch_session(target="bot")
+    client = bridge.clients["one"]
+    client.get_session.side_effect = lambda sid: (
+        root("old", status="exit") if sid == "devin-old" else root("new", 2)
+    )
+    client.root_sessions.return_value = [root("new", 2)]
+
+    async def messages(sid, after=None):
+        if sid == "devin-old" and after is None:
+            return ([{"event_id": "final", "source": "devin"}], "final-cursor")
+        return ([], after)
+
+    client.messages.side_effect = messages
+    result = await bridge.wait_for_reply(target="bot", timeout_seconds=0.02, poll_seconds=0.01)
+    assert [m["event_id"] for m in result["messages"]] == ["final"]
+    assert result["messages"][0]["session_id"] == "devin-old"
+    assert result["session_id"] == "devin-new" and result["timed_out"]
+
+
 async def test_send_migration_keeps_old_reply_for_next_inbox(bridge):
     await bridge.watch_session(target="bot")
     client = bridge.clients["one"]

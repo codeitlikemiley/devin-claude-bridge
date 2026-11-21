@@ -426,3 +426,20 @@ async def test_inbox_still_reads_when_the_status_request_fails(bridge, orgs):
     inbox = await bridge.check_inbox()
     assert [m["message"] for m in inbox["sessions"][0]["messages"]] == ["hello"]
     assert "notices" not in inbox
+
+
+async def test_inbox_asks_one_by_one_when_listing_is_denied(bridge, orgs):
+    session = orgs["work"].add("a")
+    orgs["work"].add("b")
+    await bridge.add_target("one", "a")
+    await bridge.add_target("two", "b")
+    session["is_archived"] = True
+    orgs["work"].status_denied = True
+    orgs["work"].calls.clear()
+    inbox = await bridge.check_inbox()
+    assert [c for c in orgs["work"].calls if c[0] == "get"] == [
+        ("get", "devin-a"),
+        ("get", "devin-b"),
+    ]
+    assert [n["target"] for n in inbox["notices"]] == ["one"]
+    assert list(json.loads(bridge.state.path.read_text())["work"]) == ["devin-b"]
