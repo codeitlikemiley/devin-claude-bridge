@@ -245,6 +245,31 @@ async def test_explicit_unwatch_removes_configured_alias_watch(bridge):
     assert await bridge.check_inbox() == {"sessions": []}
 
 
+async def test_retry_does_not_consume_drained_predecessor_reply(bridge):
+    await bridge.watch_session(target="bot")
+    client = bridge.clients["one"]
+    client.get_session.return_value = root("old", status="exit")
+    client.root_sessions.return_value = [root("current", 2)]
+    await bridge.send_message("next", target="bot")
+    client.get_session.return_value = root("current", 2)
+    client.root_sessions.return_value = [root("replacement", 3)]
+    calls = []
+
+    async def messages(sid, after):
+        calls.append((sid, after))
+        if sid == "devin-current":
+            raise DevinAPIError(410, "current gone")
+        if sid == "devin-old" and after is None:
+            return ([{"event_id": "final", "source": "devin"}], "final-cursor")
+        return ([], after)
+
+    client.messages.side_effect = messages
+    result = await bridge.read_messages(target="bot")
+    assert [m["event_id"] for m in result["messages"]] == ["final"]
+    assert calls.count(("devin-old", None)) == 2
+    assert result["session_id"] == "devin-replacement"
+
+
 async def test_list_bots_grouped_newest_and_empty(bridge):
     client = bridge.clients["one"]
     client.root_sessions.return_value = [

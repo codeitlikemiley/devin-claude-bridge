@@ -122,6 +122,7 @@ class Bridge:
             return messages
 
         name, sid = await self._resolve(data, target, account, session_id, readable=readable)
+        before = deepcopy(data) if readable else None
         try:
             return name, sid, await run(name, sid)
         except DevinAPIError as exc:
@@ -129,6 +130,9 @@ class Bridge:
                 "bot_service_user_id"
             ):
                 raise
+            if before is not None:
+                data.clear()
+                data.update(before)
             unavailable.add(sid)
         name, sid = await self._resolve(data, target, account, session_id, force=True)
         return name, sid, await run(name, sid)
