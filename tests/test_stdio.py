@@ -18,7 +18,7 @@ async def test_stdio_smoke(tmp_path):
         await session.initialize()
         result = await session.list_tools()
         names = sorted(tool.name for tool in result.tools)
-        assert len(names) == 10
+        assert len(names) == 12
         response = await session.call_tool("list_accounts", {})
         assert not response.isError
         assert "fake-key" not in str(response)

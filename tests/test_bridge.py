@@ -20,7 +20,10 @@ def bridge(tmp_path):
         {"one": Account("org-one", "secret"), "two": Account("org-two", "second-secret")},
         {"bot": {"account": "one", "session_id": "devin-a"}},
     )
-    return Bridge(config, State(tmp_path / "state.json"), lambda a: AsyncMock())
+    bridge = Bridge(config, State(tmp_path / "state.json"), lambda a: AsyncMock())
+    for client in bridge.clients.values():
+        client.get_session.return_value = {"status": "running", "is_archived": False}
+    return bridge
 
 
 async def test_create_send_watch_unwatch(bridge):
@@ -140,6 +143,8 @@ async def test_tools_registered(bridge):
         "list_bots",
         "list_sessions",
         "create_session",
+        "add_target",
+        "remove_target",
         "send_message",
         "read_messages",
         "wait_for_reply",

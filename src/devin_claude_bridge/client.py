@@ -54,6 +54,13 @@ class DevinClient:
             raise ValueError("limit must be between 1 and 200")
         return await self.request("GET", params={"first": limit})
 
+    async def recent_sessions(self, active_only=True):
+        """One page of up to 200 sessions; with active_only, archived ones are left out."""
+        params = {"first": 200}
+        if active_only:
+            params["is_archived"] = "false"
+        return (await self.request("GET", params=params))["items"]
+
     async def root_sessions(self, service_user_id=None):
         params = {"first": 200, "is_archived": "false"}
         if service_user_id:
