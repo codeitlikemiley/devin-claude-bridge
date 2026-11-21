@@ -1,0 +1,14 @@
+[accounts.max2]
+org_id = "org-replace-me"
+api_key_env = "DEVIN_MAX2_API_KEY"
+# base_url = "https://api.devin.ai"
+
+[accounts.work]
+org_id = "org-another-org"
+api_key_env = "DEVIN_WORK_API_KEY"
+# api_key = "literal-key" # Supported, but environment variables are preferred.
+
+[targets.research-bot]
+account = "max2"
+session_id = "devin-replace-me"
+description = "Research and investigation"
