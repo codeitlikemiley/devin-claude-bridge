@@ -222,6 +222,29 @@ async def test_legacy_cache_without_identity_is_resolved_again(bridge):
     client.send_message.assert_awaited_once_with("devin-new", "hello")
 
 
+@pytest.mark.parametrize("by_alias", [True, False])
+async def test_removed_alias_is_skipped_and_can_be_unwatched(bridge, by_alias):
+    await bridge.watch_session(target="bot")
+    bridge.config.targets.clear()
+    result = await bridge.check_inbox()
+    assert result["sessions"] == []
+    assert result["skipped_targets"][0]["target"] == "bot"
+    bridge.clients["one"].messages.assert_not_awaited()
+    if by_alias:
+        await bridge.unwatch_session(target="bot")
+    else:
+        await bridge.unwatch_session(account="one", session_id="old")
+    assert json.loads(bridge.state.path.read_text())["one"] == {}
+    assert await bridge.check_inbox() == {"sessions": []}
+
+
+async def test_explicit_unwatch_removes_configured_alias_watch(bridge):
+    await bridge.watch_session(target="bot")
+    await bridge.unwatch_session(account="one", session_id="old")
+    assert json.loads(bridge.state.path.read_text())["one"] == {}
+    assert await bridge.check_inbox() == {"sessions": []}
+
+
 async def test_list_bots_grouped_newest_and_empty(bridge):
     client = bridge.clients["one"]
     client.root_sessions.return_value = [

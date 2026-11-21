@@ -41,3 +41,15 @@ def test_config_error_on_stderr(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "missing key" in captured.err
+
+
+def test_orphan_alias_inbox_does_not_fail_cli(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["devin-claude-bridge", "inbox"])
+    result = {"sessions": [], "skipped_targets": [{"target": "deleted-bot"}]}
+    with (
+        patch("devin_claude_bridge.cli.load_config"),
+        patch("devin_claude_bridge.cli.Bridge") as bridge,
+    ):
+        bridge.return_value.check_inbox = AsyncMock(return_value=result)
+        main()
+    assert json.loads(capsys.readouterr().out) == result

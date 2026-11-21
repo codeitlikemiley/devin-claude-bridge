@@ -116,10 +116,19 @@ are terminal; `suspended` is not (sending can resume it). Terminal or archived
 sessions, and 404/410 responses, trigger fresh resolution. A failed operation is
 retried at most once on the newly resolved session. Inbox watches retain the alias
 while moving to the new session, with a separate cursor for that session, so an
-old conversation cursor is never applied to a new one. If no active root exists,
-the call reports an error and a later inbox check can try again. Unwatching a Bot
+old conversation cursor is never applied to a new one. Unread replies from the
+previous conversation are drained too (and carry their original `session_id`),
+including when a send has already moved the alias. A terminal conversation with
+no successor remains readable; sending still requires an active root. If the old
+messages endpoint itself returns 404/410, its replies cannot be recovered.
+The cache records the Bot service user ID, so changing an alias to a different
+Bot invalidates it rather than sending to the old Bot. Unwatching a Bot
 forgets its alias/cache without making network requests. Explicit `session_id`
 targets keep their original behavior and never switch sessions automatically.
+Removed/reconfigured aliases are reported in `skipped_targets` by inbox without
+failing the CLI. Remove their saved watches with `unwatch_session(target="old-alias")`
+even after deleting the config entry, or unwatch any entry by account/session ID
+(which removes all aliases watching that specific entry).
 
 State lives at `~/.local/state/devin-claude-bridge/state.json`, overridden by
 `DEVIN_BRIDGE_STATE`. It stores watched sessions and last-seen cursor/event ID,

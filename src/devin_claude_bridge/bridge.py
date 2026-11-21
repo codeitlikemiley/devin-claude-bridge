@@ -157,20 +157,31 @@ class Bridge:
     ):
         """Stop watching and forget the last-seen position."""
         async with self.state.transaction() as data:
+            if target and target not in self.config.targets and not account and not session_id:
+                removed = []
+                for name, sessions in data.items():
+                    for sid, position in list(sessions.items()):
+                        if target not in position.get("targets", []):
+                            continue
+                        position["targets"].remove(target)
+                        position.get("target_service_user_ids", {}).pop(target, None)
+                        if not position["targets"] and not position.get("direct", False):
+                            del sessions[sid]
+                        removed.append({"account": name, "session_id": sid})
+                if not removed:
+                    raise ValueError(f"Unknown target: {target}")
+                return {"target": target, "watched": False, "removed_sessions": removed}
             account, sid = self.config.resolve(target, account, session_id)
             sessions = data.get(account, {})
             if self.config.targets.get(target, {}).get("bot_service_user_id"):
                 sid = next((s for s, p in sessions.items() if target in p.get("targets", [])), None)
                 if sid:
                     sessions[sid]["targets"].remove(target)
+                    sessions[sid].get("target_service_user_ids", {}).pop(target, None)
                     if not sessions[sid]["targets"] and not sessions[sid].get("direct", False):
                         del sessions[sid]
             else:
-                position = sessions.get(sid, {})
-                if position.get("targets"):
-                    position["direct"] = False
-                else:
-                    sessions.pop(sid, None)
+                sessions.pop(sid, None)
         return {"account": account, "session_id": sid, "watched": False}
 
     async def send_message(
@@ -241,13 +252,26 @@ class Bridge:
         if account:
             self.client(account)
         groups = []
+        skipped = []
         async with self.state.transaction() as data:
             work = []
             for name, sessions in data.items():
                 if account and name != account:
                     continue
                 for sid, position in sessions.items():
-                    work.extend((alias, None, None) for alias in position.get("targets", []))
+                    for alias in position.get("targets", []):
+                        entry = self.config.targets.get(alias, {})
+                        if entry.get("bot_service_user_id") and entry.get("account") == name:
+                            work.append((alias, None, None))
+                        else:
+                            skipped.append(
+                                {
+                                    "target": alias,
+                                    "account": name,
+                                    "session_id": sid,
+                                    "reason": "Alias removed or reconfigured; unwatch to forget it",
+                                }
+                            )
                     if position.get("direct", not position.get("targets")):
                         work.append((None, name, sid))
             for target, name, sid in work:
@@ -265,7 +289,7 @@ class Bridge:
                     data.clear()
                     data.update(before)
                     groups.append({**group, "error": str(exc)})
-        return {"sessions": groups}
+        return {"sessions": groups, **({"skipped_targets": skipped} if skipped else {})}
 
     async def wait_for_reply(
         self,
