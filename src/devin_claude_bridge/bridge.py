@@ -55,8 +55,11 @@ class Bridge:
             return account, sid
         sessions = data.setdefault(account, {})
         cached = next((s for s, p in sessions.items() if target in p.get("targets", [])), None)
+        retargeted = bool(
+            cached and sessions[cached].get("target_service_user_ids", {}).get(target) != bot
+        )
         terminal = False
-        if cached and not force:
+        if cached and not force and not retargeted:
             try:
                 session = await self.client(account).get_session(cached)
                 if session["status"] not in {"exit", "error"} and not session.get("is_archived"):
@@ -77,13 +80,18 @@ class Bridge:
             previous["targets"].remove(target)
         position = sessions.setdefault(sid, {"cursor": None, "event_id": None, "direct": False})
         position.setdefault("direct", not position.get("targets"))
-        if cached and cached != sid:
+        if cached and cached != sid and not retargeted:
             pending = position.setdefault("previous_sessions", [])
             for previous_sid in [*sessions[cached].get("previous_sessions", []), cached]:
                 if previous_sid not in pending and previous_sid != sid:
                     pending.append(previous_sid)
         if target not in position.setdefault("targets", []):
             position["targets"].append(target)
+        position.setdefault("target_service_user_ids", {})[target] = bot
+        if cached and cached != sid and retargeted:
+            previous = sessions[cached]
+            if not previous.get("targets") and not previous.get("direct", False):
+                del sessions[cached]
         return account, sid
 
     async def _operate(self, data, target, account, session_id, operation, readable=False):

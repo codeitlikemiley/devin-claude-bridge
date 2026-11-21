@@ -194,6 +194,34 @@ async def test_send_migration_keeps_old_reply_for_next_inbox(bridge):
     assert result["sessions"][0]["messages"][0]["session_id"] == "devin-old"
 
 
+async def test_changed_bot_identity_invalidates_persisted_alias_cache(bridge):
+    await bridge.watch_session(target="bot")
+    state = json.loads(bridge.state.path.read_text())
+    assert state["one"]["devin-old"]["target_service_user_ids"]["bot"] == "service-user-bot"
+    bridge.config.targets["bot"]["bot_service_user_id"] = "service-user-replacement"
+    client = bridge.clients["one"]
+    client.root_sessions.return_value = [
+        root("replacement", 2, service_user_id="service-user-replacement")
+    ]
+    await bridge.send_message("for replacement", target="bot")
+    client.root_sessions.assert_awaited_with("service-user-replacement")
+    client.get_session.assert_not_awaited()
+    client.send_message.assert_awaited_once_with("devin-replacement", "for replacement")
+    state = json.loads(bridge.state.path.read_text())["one"]
+    assert "devin-old" not in state
+    assert not state["devin-replacement"].get("previous_sessions")
+
+
+async def test_legacy_cache_without_identity_is_resolved_again(bridge):
+    async with bridge.state.transaction() as data:
+        data["one"] = {"devin-old": {"cursor": "old-cursor", "targets": ["bot"], "direct": False}}
+    client = bridge.clients["one"]
+    client.root_sessions.return_value = [root("new", 2)]
+    await bridge.send_message("hello", target="bot")
+    client.root_sessions.assert_awaited_once_with("service-user-bot")
+    client.send_message.assert_awaited_once_with("devin-new", "hello")
+
+
 async def test_list_bots_grouped_newest_and_empty(bridge):
     client = bridge.clients["one"]
     client.root_sessions.return_value = [
