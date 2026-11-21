@@ -1,19 +1,24 @@
-[accounts.max2]
-org_id = "org-replace-me"
-api_key_env = "DEVIN_MAX2_API_KEY" # Personal Access Token recommended for local use.
-# base_url = "https://api.devin.ai"
-
-[accounts.work]
-org_id = "org-another-org"
-api_key_env = "DEVIN_WORK_API_KEY"
-# api_key = "literal-key" # Supported, but environment variables are preferred.
+# Optional. Accounts normally come from the environment, one pair per account:
+#
+#   export DEVIN_API_KEY_WORK='cog_...'
+#   export DEVIN_ORG_ID_WORK='org-...'
+#
+# The suffix in lower case is the account name ("work"). This file is for target
+# aliases, and for accounts that need a base_url or another variable name.
 
 [targets.research-bot]
-account = "max2"
+account = "max2" # from DEVIN_API_KEY_MAX2 and DEVIN_ORG_ID_MAX2
 bot_service_user_id = "service-user-replace-me"
 description = "Research Bot; follows the newest root conversation after recycling"
 
 [targets.pinned-session]
-account = "work"
+account = "work" # from DEVIN_API_KEY_WORK and DEVIN_ORG_ID_WORK
 session_id = "devin-replace-me"
 description = "A specific session; does not follow Bot restarts"
+
+# An account defined here instead of by an environment pair:
+#
+# [accounts.staging]
+# org_id = "org-replace-me"
+# api_key_env = "MY_STAGING_DEVIN_KEY" # or api_key = "literal-key" (not preferred)
+# base_url = "https://api.devin.ai"

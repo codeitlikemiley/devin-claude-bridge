@@ -45,6 +45,41 @@ class Config:
         return account, session_id(session)
 
 
+KEY_PREFIX = "DEVIN_API_KEY_"
+ORG_PREFIX = "DEVIN_ORG_ID_"
+
+
+def env_accounts(file_key_envs=()) -> dict[str, dict]:
+    """Accounts named by environment pairs: DEVIN_API_KEY_<NAME> with DEVIN_ORG_ID_<NAME>.
+
+    The suffix, in lower case, is the account name. A key variable that the config
+    file already names in `api_key_env` belongs to that file account and is skipped.
+    """
+    suffixes = {}
+    for variable in os.environ:
+        for prefix in (KEY_PREFIX, ORG_PREFIX):
+            suffix = variable[len(prefix) :]
+            if variable.startswith(prefix) and suffix:
+                suffixes.setdefault(suffix.lower(), set()).add(suffix)
+    entries = {}
+    for name, spellings in sorted(suffixes.items()):
+        if len(spellings) > 1:
+            found = ", ".join(sorted(spellings))
+            raise ValueError(f"Account {name}: use one spelling of the suffix, found {found}")
+        suffix = spellings.pop()
+        key_env, org_env = KEY_PREFIX + suffix, ORG_PREFIX + suffix
+        if key_env in file_key_envs:
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9_]+", suffix):
+            raise ValueError(f"Account suffix {suffix!r}: use letters, digits and underscores")
+        for present, missing in ((key_env, org_env), (org_env, key_env)):
+            if os.getenv(present) and not os.getenv(missing):
+                raise ValueError(f"Account {name}: {present} is set but {missing} is not")
+        if os.getenv(key_env):
+            entries[name] = {"org_id": os.environ[org_env], "api_key_env": key_env}
+    return entries
+
+
 def load_config() -> Config:
     override = os.getenv("DEVIN_BRIDGE_CONFIG")
     path = Path(override or "~/.config/devin-claude-bridge/config.toml").expanduser()
@@ -53,23 +88,42 @@ def load_config() -> Config:
             data = tomllib.load(stream)
     else:
         data = {}
-    entries = data.get("accounts", {})
+    entries = dict(data.get("accounts", {}))
+    discovered = env_accounts({e.get("api_key_env") for e in entries.values()})
+    for name in discovered:
+        if name in entries:
+            raise ValueError(
+                f"Account {name}: defined in the config file and by DEVIN_API_KEY_* variables"
+            )
     if not entries and (os.getenv("DEVIN_API_KEY") or os.getenv("DEVIN_ORG_ID")):
-        entries = {
-            "default": {"org_id": os.getenv("DEVIN_ORG_ID", ""), "api_key_env": "DEVIN_API_KEY"}
+        if "default" in discovered:
+            raise ValueError(
+                "Account default: defined by DEVIN_API_KEY and by DEVIN_API_KEY_DEFAULT"
+            )
+        entries["default"] = {
+            "org_id": os.getenv("DEVIN_ORG_ID", ""),
+            "api_key_env": "DEVIN_API_KEY",
         }
+    entries.update(discovered)
     accounts = {}
     for name, entry in entries.items():
         key = os.getenv(entry["api_key_env"]) if entry.get("api_key_env") else entry.get("api_key")
         if not key:
             raise ValueError(f"Account {name}: missing API key; set api_key_env or api_key")
         org = entry.get("org_id", "")
+        for label, value in (("API key", key), ("org_id", org)):
+            if value.startswith("${"):
+                raise ValueError(
+                    f"Account {name}: {label} is the unexpanded text {value}; "
+                    "set that variable in the shell that starts Claude Code"
+                )
         if not re.fullmatch(r"org-[A-Za-z0-9_-]+", org):
             raise ValueError(f"Account {name}: org_id must start with org-")
         accounts[name] = Account(org, key, entry.get("base_url", "https://api.devin.ai"))
     if not accounts:
         raise ValueError(
-            "No accounts configured; set DEVIN_API_KEY and DEVIN_ORG_ID or config.toml"
+            "No accounts configured; set DEVIN_API_KEY and DEVIN_ORG_ID, "
+            "DEVIN_API_KEY_<NAME> and DEVIN_ORG_ID_<NAME> pairs, or config.toml"
         )
     targets = {}
     for name, entry in data.get("targets", {}).items():

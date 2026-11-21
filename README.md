@@ -85,28 +85,45 @@ The last line is the result:
 * A line starting with `curl:` and `HTTP 000`: no response came back from Devin,
   so the token was not checked. Check your network and run the command again.
 
-**Several accounts** need a config file. Copy
-[`config.example.toml`](config.example.toml) to
-`~/.config/devin-claude-bridge/config.toml`, replace the org and session IDs, and
-export one key per account under the names the file uses:
+**Several accounts** need no config file either. Give each account a name and
+export one pair of variables with that name as the suffix:
 
 ```sh
-export DEVIN_MAX2_API_KEY='cog_token_for_max2'
-export DEVIN_WORK_API_KEY='cog_token_for_work'
+export DEVIN_API_KEY_WORK='cog_token_for_work'
+export DEVIN_ORG_ID_WORK='org-for-work'
+
+export DEVIN_API_KEY_MAX2='cog_token_for_max2'
+export DEVIN_ORG_ID_MAX2='org-for-max2'
 ```
+
+* The suffix in lower case is the account name: these are `work` and `max2`. It
+  is the name you say to Claude, so pick one you will recognise. Letters, digits
+  and underscores work, so `DEVIN_API_KEY_1` with `DEVIN_ORG_ID_1` is account `1`.
+* Both variables of a pair must be set. One without the other is an error that
+  names the missing variable.
+* The unsuffixed pair (`DEVIN_API_KEY`, `DEVIN_ORG_ID`) can sit beside them as
+  the account `default`.
 
 Check each key the same way, with its own variable name in the `curl` command.
 
-`[accounts.<name>]` supports `org_id`, `api_key_env` (preferred) or `api_key`,
-and optional `base_url`. If `api_key_env` is set, it takes precedence and must be
-present and nonempty. `[targets.<alias>]` supports `account`, exactly one of
-`session_id` or `bot_service_user_id`, and optional `description`.
-Never commit real keys; restrict the config with `chmod 600` if it contains
-literal keys. `base_url` receives the bearer key: only use trusted URLs.
+**A config file is optional.** You need
+`~/.config/devin-claude-bridge/config.toml` only for target aliases, a custom
+`base_url`, or keys held under other variable names. Start from
+[`config.example.toml`](config.example.toml).
+
+* `[targets.<alias>]` supports `account`, exactly one of `session_id` or
+  `bot_service_user_id`, and optional `description`. The account can be one from
+  the environment.
+* `[accounts.<name>]` supports `org_id`, `api_key_env` (preferred) or `api_key`,
+  and optional `base_url`. If `api_key_env` is set, it takes precedence and must
+  be present and nonempty. File accounts and environment pairs are used
+  together; the same name in both is an error.
+* Never commit real keys; restrict the config with `chmod 600` if it contains
+  literal keys. `base_url` receives the bearer key: only use trusted URLs.
 
 Config override: `DEVIN_BRIDGE_CONFIG=/absolute/path/config.toml`. An explicit
-missing file is an error. The single-account environment fallback applies only
-when the config has no accounts; it does not merge into named accounts.
+missing file is an error. When the file defines accounts, the unsuffixed
+`DEVIN_API_KEY` pair is ignored; suffixed pairs still count.
 
 ### 3. Add the server to Claude Code
 
@@ -119,14 +136,17 @@ claude mcp add devin-bridge --scope user \
   -- uvx --from git+https://github.com/codeitlikemiley/devin-claude-bridge devin-claude-bridge
 ```
 
-Several accounts: pass each key variable your config file names.
+Several accounts: pass each account's pair.
 
 ```sh
 claude mcp add devin-bridge --scope user \
-  -e 'DEVIN_MAX2_API_KEY=${DEVIN_MAX2_API_KEY}' \
-  -e 'DEVIN_WORK_API_KEY=${DEVIN_WORK_API_KEY}' \
+  -e 'DEVIN_API_KEY_WORK=${DEVIN_API_KEY_WORK}' -e 'DEVIN_ORG_ID_WORK=${DEVIN_ORG_ID_WORK}' \
+  -e 'DEVIN_API_KEY_MAX2=${DEVIN_API_KEY_MAX2}' -e 'DEVIN_ORG_ID_MAX2=${DEVIN_ORG_ID_MAX2}' \
   -- uvx --from git+https://github.com/codeitlikemiley/devin-claude-bridge devin-claude-bridge
 ```
+
+To add an account later, export its pair, then remove the server and add it
+again with the extra pair.
 
 * `--scope user` makes the server available in every project. Without it the
   server exists only in the folder where you ran the command.
@@ -147,8 +167,8 @@ It should report `✔ Connected`. Start `claude`, run `/mcp`, and `devin-bridge`
 is listed with 10 tools. Ask Claude "list my Devin accounts" to try it.
 
 If it reports `✘ Failed to connect`, run the server's inbox command in the same
-terminal. It prints the reason, for example a missing key variable or an
-`org_id` that does not start with `org-`:
+terminal. It prints the reason, for example a pair with one variable missing, a
+`${NAME}` that was never set, or an `org_id` that does not start with `org-`:
 
 ```sh
 uvx --from git+https://github.com/codeitlikemiley/devin-claude-bridge devin-claude-bridge inbox
