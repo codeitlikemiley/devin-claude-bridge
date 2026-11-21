@@ -110,8 +110,12 @@ def test_env_pairs_sit_beside_the_default_pair(monkeypatch):
 @pytest.mark.parametrize(
     "variable,value,error",
     [
-        ("DEVIN_API_KEY_WORK", "key", "DEVIN_API_KEY_WORK is set but DEVIN_ORG_ID_WORK is not"),
-        ("DEVIN_ORG_ID_WORK", "org-x", "DEVIN_ORG_ID_WORK is set but DEVIN_API_KEY_WORK is not"),
+        ("DEVIN_API_KEY_WORK", "key", "DEVIN_API_KEY_WORK is set but DEVIN_ORG_ID_WORK is not set"),
+        (
+            "DEVIN_ORG_ID_WORK",
+            "org-x",
+            "DEVIN_ORG_ID_WORK is set but DEVIN_API_KEY_WORK is not set",
+        ),
     ],
 )
 def test_half_an_env_pair_is_an_error(monkeypatch, variable, value, error):
@@ -123,8 +127,8 @@ def test_half_an_env_pair_is_an_error(monkeypatch, variable, value, error):
 @pytest.mark.parametrize(
     "key,org,error",
     [
-        ("", None, "DEVIN_API_KEY_WORK and DEVIN_ORG_ID_WORK are empty"),
-        ("", "", "DEVIN_API_KEY_WORK and DEVIN_ORG_ID_WORK are empty"),
+        ("", None, "DEVIN_API_KEY_WORK is empty and DEVIN_ORG_ID_WORK is not set"),
+        ("", "", "DEVIN_API_KEY_WORK is empty and DEVIN_ORG_ID_WORK is empty"),
         ("key", "", "DEVIN_API_KEY_WORK is set but DEVIN_ORG_ID_WORK is empty"),
         ("", "org-x", "DEVIN_ORG_ID_WORK is set but DEVIN_API_KEY_WORK is empty"),
     ],

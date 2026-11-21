@@ -73,12 +73,12 @@ def env_accounts(file_key_envs=()) -> dict[str, dict]:
         if not re.fullmatch(r"[A-Za-z0-9_]+", suffix):
             raise ValueError(f"Account suffix {suffix!r}: use letters, digits and underscores")
         unset = [v for v in (key_env, org_env) if not os.getenv(v)]
+        states = [f"{v} is {'empty' if v in os.environ else 'not set'}" for v in unset]
         if len(unset) == 2:
-            raise ValueError(f"Account {name}: {key_env} and {org_env} are empty")
+            raise ValueError(f"Account {name}: {' and '.join(states)}")
         if unset:
             present = org_env if unset[0] == key_env else key_env
-            state = "empty" if unset[0] in os.environ else "not"
-            raise ValueError(f"Account {name}: {present} is set but {unset[0]} is {state}")
+            raise ValueError(f"Account {name}: {present} is set but {states[0]}")
         entries[name] = {"org_id": os.environ[org_env], "api_key_env": key_env}
     return entries
 
