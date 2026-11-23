@@ -22,7 +22,8 @@ Then repeat until the work list is empty:
    every message it returns, also when it returns `timed_out: true`: a reply
    read once is not returned again. While it returns `timed_out: true`, call it
    again and add the new messages to the ones you kept.
-4. Read the result first, then the kept messages:
+4. Read the result first, then the kept messages. A worker's reply counts as
+   `DONE` or `BLOCKED` only when the message starts with that word.
    - `ended` in the result, without a `DONE`: the worker's session stopped, so
      nothing more can be sent to it, even after a `BLOCKED`. Put the task back
      in the work list as unfinished, with the kept messages (and the open
