@@ -122,8 +122,8 @@ class Bridge:
         if target:
             head = f"Target {target} points to a session that {_what(session, reason)}"
             advice = (
-                f'Re-point it with add_target("{target}", <session URL>), or start a new '
-                f'session with create_session(..., alias="{target}").'
+                f'Re-point it with add_target("{target}", <session URL>). For a Free '
+                "session, start it in the Devin web app with Free picked."
             )
         else:
             head = f"Session {sid} on account {account} {_what(session, reason)}"
@@ -739,8 +739,8 @@ class Bridge:
                                 "reason": reason,
                                 "message": (
                                     f"Target {alias}: its session {said}. Re-point it with "
-                                    f'add_target("{alias}", <session URL>) or '
-                                    f'create_session(..., alias="{alias}").'
+                                    f'add_target("{alias}", <session URL>). For a Free '
+                                    "session, start it in the Devin web app with Free picked."
                                 ),
                             }
                         )

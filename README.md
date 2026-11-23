@@ -508,9 +508,10 @@ Set it up once in the controller account:
    * Environment variables: each pair from step 1, with its value referring to the
      secret of the same name, such as `$DEVIN_API_KEY_A`.
 3. **Check it:** start a new session in the controller account and ask it to call
-   `list_sessions`. Each worker account must show sessions, and `errors` must be
-   absent. `list_accounts` is not enough: it reads only the local configuration and
-   does not ask Devin whether a key works.
+   `list_sessions`. The result must have no `errors` entry: each worker account was
+   asked for its sessions and its key worked. An account with no active sessions
+   shows no rows, and that is not a failure. `list_accounts` is not enough: it reads
+   only the local configuration and does not ask Devin whether a key works.
 
 Devin's docs do not show how an MCP environment variable refers to a secret, so
 check step 3 before you depend on it. If `uvx` is not on the machine, install

@@ -112,6 +112,7 @@ async def test_send_to_an_archived_alias_sends_nothing_and_says_how_to_fix(bridg
         await bridge.send_message("still there?", target="hexuria")
     text = str(error.value)
     assert "Target hexuria points to a session that is archived" in text
+    assert "create_session" not in text and "Free picked" in text
     assert "Nothing was sent" in text and 'add_target("hexuria"' in text
     assert '"Other" https://app.devin.ai/sessions/other' in text
     assert orgs["hexuria"].sent == []
@@ -143,6 +144,7 @@ async def test_inbox_delivers_last_replies_then_reports_a_dead_alias_once(bridge
     notice = first["notices"][0]
     assert (notice["target"], notice["reason"]) == ("hexuria", "archived")
     assert 'add_target("hexuria"' in notice["message"]
+    assert "create_session" not in notice["message"]
     assert json.loads(bridge.state.path.read_text())["hexuria"] == {}
     orgs["hexuria"].calls.clear()
     assert await bridge.check_inbox() == {"sessions": []}
