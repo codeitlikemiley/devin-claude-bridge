@@ -22,13 +22,14 @@ Then repeat until the work list is empty:
    every message it returns, also when it returns `timed_out: true`: a reply
    read once is not returned again. While it returns `timed_out: true`, call it
    again and add the new messages to the ones you kept.
-4. Read the kept messages. The worker's reply starts with `DONE` or `BLOCKED`.
-   - `BLOCKED`: find the answer in the work list or the repository, or ask the
-     person here and wait. Send the answer to the same worker and go back to
-     step 3 for the same task.
-   - `ended` in the result before a `DONE`: the worker's session stopped. Put the
-     task back in the work list as unfinished, with the kept messages, and tell
-     the person (see Rules).
+4. Read the result first, then the kept messages:
+   - `ended` in the result, without a `DONE`: the worker's session stopped, so
+     nothing more can be sent to it, even after a `BLOCKED`. Put the task back
+     in the work list as unfinished, with the kept messages (and the open
+     question, if any), and tell the person (see Rules).
+   - `BLOCKED`, and the session has not ended: find the answer in the work list
+     or the repository, or ask the person here and wait. Send the answer to the
+     same worker and go back to step 3 for the same task.
 5. `DONE`: record the result in the work list, and release the worker.
 
 With several free workers, send a task to each, then wait for each in turn.

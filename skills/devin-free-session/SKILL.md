@@ -63,9 +63,12 @@ missing. Each step ends on its check.
 7. **Prompt.** Type the prompt into the **Prompt** box. Check, right before
    sending: the mode button still reads `Free`, and the screenshot shows the prompt.
 8. **Send.** Click **Send**. The tab moves to `https://app.devin.ai/sessions/<id>`.
-   Check: the URL has a session ID, and the session page's mode button reads
-   `Free`. Copy the URL. The browser is the only place that shows Free: the API
-   reads an empty `devin_mode` for Free sessions and for agent previews alike.
+   Check: the URL has a session ID; copy it first. Then check that the session
+   page's mode button reads `Free`. When it reads anything else, or the mode
+   cannot be seen, the session can be billed: tell the person at once, with the
+   URL, so they can stop it in the web app, and stop without aliasing it. The
+   browser is the only place that shows Free: the API reads an empty
+   `devin_mode` for Free sessions and for agent previews alike.
 9. **Alias.** Call `add_target(alias, <session URL>, account)`. Check: it returns
    the session with that account.
 10. **Billing check.** Call `list_sessions(account=<account>)` and find the
