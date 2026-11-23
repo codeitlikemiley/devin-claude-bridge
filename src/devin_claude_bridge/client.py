@@ -94,11 +94,10 @@ class DevinClient:
             seen.add(cursor)
             params["after"] = cursor
 
-    async def create_session(self, prompt, title=None):
-        body = {"prompt": prompt}
-        if title is not None:
-            body["title"] = title
-        return await self.request("POST", json=body)
+    async def create_session(self, prompt, title=None, **options):
+        """Create a session. Options that are None are left out of the request."""
+        body = {"prompt": prompt, "title": title, **options}
+        return await self.request("POST", json={k: v for k, v in body.items() if v is not None})
 
     async def get_session(self, sid):
         return await self.request("GET", f"/{session_id(sid)}")

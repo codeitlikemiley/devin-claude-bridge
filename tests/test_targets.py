@@ -112,6 +112,7 @@ async def test_send_to_an_archived_alias_sends_nothing_and_says_how_to_fix(bridg
         await bridge.send_message("still there?", target="hexuria")
     text = str(error.value)
     assert "Target hexuria points to a session that is archived" in text
+    assert "create_session" not in text and "Free picked" in text
     assert "Nothing was sent" in text and 'add_target("hexuria"' in text
     assert '"Other" https://app.devin.ai/sessions/other' in text
     assert orgs["hexuria"].sent == []
@@ -143,6 +144,7 @@ async def test_inbox_delivers_last_replies_then_reports_a_dead_alias_once(bridge
     notice = first["notices"][0]
     assert (notice["target"], notice["reason"]) == ("hexuria", "archived")
     assert 'add_target("hexuria"' in notice["message"]
+    assert "create_session" not in notice["message"]
     assert json.loads(bridge.state.path.read_text())["hexuria"] == {}
     orgs["hexuria"].calls.clear()
     assert await bridge.check_inbox() == {"sessions": []}
@@ -346,20 +348,114 @@ async def test_remove_target(bridge, orgs):
 
 async def test_create_session_with_alias(tmp_path, orgs):
     bridge = make(tmp_path, orgs, {"filed": {"account": "work", "session_id": "devin-a"}})
+    bridge.config.allow_create = True
     with pytest.raises(ValueError, match="defined in config.toml"):
-        await bridge.create_session("work", "do it", alias="filed")
+        await bridge.create_session("work", "do it", alias="filed", devin_mode="lite")
     assert orgs["work"].sessions == {}
-    created = await bridge.create_session("work", "do it", title="Task", alias="work")
+    created = await bridge.create_session(
+        "work", "do it", title="Task", alias="work", devin_mode="lite"
+    )
     assert created["target"] == "work"
     await bridge.send_message("more", target="work")
     assert orgs["work"].sent == [(created["session_id"], "more")]
-    second = await bridge.create_session("work", "next", alias="work")
+    second = await bridge.create_session("work", "next", alias="work", devin_mode="lite")
     assert second["replaced"]["session_id"] == created["session_id"]
     assert bridge.list_accounts()["targets"]["work"]["session_id"] == second["session_id"]
 
 
+async def test_create_session_passes_machine_and_options(bridge, orgs):
+    bridge.config.allow_create = True
+    await bridge.create_session(
+        "work",
+        "build it",
+        platform="windows",
+        repos=["org/app"],
+        tags=["ws1"],
+        alias="win",
+        devin_mode="lite",
+    )
+    assert orgs["work"].created == [
+        {
+            "prompt": "build it",
+            "title": None,
+            "platform": "windows",
+            "repos": ["org/app"],
+            "tags": ["ws1"],
+            "playbook_id": None,
+            "secret_ids": None,
+            "devin_mode": "lite",
+        }
+    ]
+
+
+async def test_create_session_is_off_and_needs_a_mode(bridge, orgs):
+    with pytest.raises(ValueError, match="create_session is off.*Free"):
+        await bridge.create_session("work", "build it", devin_mode="lite")
+    bridge.config.allow_create = True
+    with pytest.raises(ValueError, match="Name the devin_mode.*Nothing was created"):
+        await bridge.create_session("work", "build it")
+    assert orgs["work"].created == []
+    assert bridge.list_accounts()["targets"] == {}
+
+
+async def test_unwatching_keeps_the_send_count(bridge, orgs):
+    orgs["work"].add("a")
+    bridge.config.max_sends_per_hour = 1
+    await bridge.add_target("worker", "a")
+    await bridge.send_message("one", target="worker")
+    await bridge.remove_target("worker")
+    await bridge.unwatch_session(account="work", session_id="a")
+    with pytest.raises(ValueError, match="maximum"):
+        await bridge.send_message("two", account="work", session_id="a")
+    assert [m for _, m in orgs["work"].sent] == ["one"]
+
+
+async def test_send_limit_stops_a_loop(tmp_path, orgs, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("devin_claude_bridge.bridge.time.time", lambda: clock[0])
+    orgs["work"].add("a")
+    bridge = make(tmp_path, orgs)
+    bridge.config.max_sends_per_hour = 2
+    await bridge.send_message("one", account="work", session_id="a")
+    await bridge.send_message("two", account="work", session_id="a")
+    with pytest.raises(ValueError, match="maximum. Nothing was sent.*try again in 60 minutes"):
+        await bridge.send_message("three", account="work", session_id="a")
+    assert [m for _, m in orgs["work"].sent] == ["one", "two"]
+    # The count is in the state file, so a new bridge process refuses too.
+    restarted = make(tmp_path, orgs)
+    restarted.config.max_sends_per_hour = 2
+    with pytest.raises(ValueError, match="maximum"):
+        await restarted.send_message("three", account="work", session_id="a")
+    # Another session has its own count.
+    orgs["work"].add("b")
+    await restarted.send_message("hi", account="work", session_id="b")
+    clock[0] += 3600
+    await restarted.send_message("three", account="work", session_id="a")
+    restarted.config.max_sends_per_hour = 0
+    for text in ("four", "five", "six"):
+        await restarted.send_message(text, account="work", session_id="a")
+    assert [m for _, m in orgs["work"].sent][-5:] == ["hi", "three", "four", "five", "six"]
+
+
+async def test_failed_send_is_not_counted(tmp_path, orgs):
+    orgs["work"].add("a")
+    bridge = make(tmp_path, orgs)
+    bridge.config.max_sends_per_hour = 1
+    send = orgs["work"].send_message
+
+    async def refused(sid, message):
+        raise DevinAPIError(409, "Devin API 409: Session conflict")
+
+    orgs["work"].send_message = refused
+    with pytest.raises(ValueError, match="409"):
+        await bridge.send_message("lost", account="work", session_id="a")
+    orgs["work"].send_message = send
+    await bridge.send_message("kept", account="work", session_id="a")
+    assert [m for _, m in orgs["work"].sent] == ["kept"]
+
+
 async def test_list_sessions_across_accounts(bridge, orgs):
-    orgs["work"].add("a", updated_at=10)
+    orgs["work"].add("a", updated_at=10, devin_mode="lite")
     orgs["work"].add("archived", is_archived=True, updated_at=50)
     orgs["work"].add("done", status="exit", updated_at=40)
     orgs["hexuria"].add("b", updated_at=30, status="suspended", status_detail="inactivity")
@@ -376,6 +472,8 @@ async def test_list_sessions_across_accounts(bridge, orgs):
     assert listed["sessions"][0]["targets"] == ["hexuria"]
     assert listed["sessions"][0]["status_detail"] == "inactivity"
     assert listed["sessions"][0]["updated"] == "1970-01-01 00:00 UTC"
+    modes = {s["title"]: s["devin_mode"] for s in listed["sessions"]}
+    assert modes["A"] == "lite" and modes["B"] is None
     everything = await bridge.list_sessions(account="work", active_only=False, limit=2)
     assert [s["title"] for s in everything["sessions"]] == ["Archived", "Done"]
     orgs["work"].down = True

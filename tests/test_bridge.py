@@ -32,7 +32,8 @@ def bridge(tmp_path):
 
 async def test_create_send_watch_unwatch(bridge):
     bridge.clients["one"].create_session.return_value = {"session_id": "a"}
-    await bridge.create_session("one", "prompt", "title")
+    bridge.config.allow_create = True
+    await bridge.create_session("one", "prompt", "title", devin_mode="lite")
     await bridge.send_message("hello", target="bot")
     bridge.clients["one"].send_message.assert_awaited_once_with("devin-a", "hello")
     data = json.loads(bridge.state.path.read_text())

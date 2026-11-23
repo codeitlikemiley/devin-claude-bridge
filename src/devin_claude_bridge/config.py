@@ -18,6 +18,27 @@ def session_id(value: str) -> str:
     return f"devin-{value}"
 
 
+DEFAULT_MAX_SENDS_PER_HOUR = 30
+
+
+def max_sends_per_hour() -> int:
+    raw = os.getenv("DEVIN_BRIDGE_MAX_SENDS_PER_HOUR", "").strip()
+    if not raw:
+        return DEFAULT_MAX_SENDS_PER_HOUR
+    if not raw.isdigit():
+        raise ValueError(
+            f"DEVIN_BRIDGE_MAX_SENDS_PER_HOUR must be a whole number of 0 or more, not {raw!r}"
+        )
+    return int(raw)
+
+
+def allow_create() -> bool:
+    raw = os.getenv("DEVIN_BRIDGE_ALLOW_CREATE", "").strip()
+    if raw not in {"", "0", "1"}:
+        raise ValueError(f"DEVIN_BRIDGE_ALLOW_CREATE must be 0 or 1, not {raw!r}")
+    return raw == "1"
+
+
 @dataclass
 class Account:
     org_id: str
@@ -29,6 +50,10 @@ class Account:
 class Config:
     accounts: dict[str, Account]
     targets: dict[str, dict]
+    # Messages the bridge sends to one session in an hour before it refuses; 0 is no limit.
+    max_sends_per_hour: int = DEFAULT_MAX_SENDS_PER_HOUR
+    # Whether create_session may start sessions; DEVIN_BRIDGE_ALLOW_CREATE=1 turns it on.
+    allow_create: bool = False
 
     def resolve(self, target=None, account=None, session=None):
         if target:
@@ -192,4 +217,4 @@ def load_config() -> Config:
             ),
             "description": entry.get("description", ""),
         }
-    return Config(accounts, targets)
+    return Config(accounts, targets, max_sends_per_hour(), allow_create())
