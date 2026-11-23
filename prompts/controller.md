@@ -16,14 +16,20 @@ Setup, once:
 Then repeat until the work list is empty:
 
 1. Take the next task. Pick a worker on the machine the task needs, that has no
-   task now.
+   task now. The task stays assigned to that worker until step 5 releases it.
 2. Send the whole task in one message: `send_message(task, target=alias)`.
-3. Call `wait_for_reply(target=alias, until_idle=true, timeout_seconds=600)`. While
-   it returns `timed_out: true`, call it again. The worker's reply starts with
-   `DONE` or `BLOCKED`.
-4. `DONE`: record the result in the work list. `BLOCKED`: answer the question when
-   the work list or the repository answers it; otherwise ask the person here and
-   wait.
+3. Call `wait_for_reply(target=alias, until_idle=true, timeout_seconds=600)`. Keep
+   every message it returns, also when it returns `timed_out: true`: a reply
+   read once is not returned again. While it returns `timed_out: true`, call it
+   again and add the new messages to the ones you kept.
+4. Read the kept messages. The worker's reply starts with `DONE` or `BLOCKED`.
+   - `BLOCKED`: find the answer in the work list or the repository, or ask the
+     person here and wait. Send the answer to the same worker and go back to
+     step 3 for the same task.
+   - `ended` in the result before a `DONE`: the worker's session stopped. Put the
+     task back in the work list as unfinished, with the kept messages, and tell
+     the person (see Rules).
+5. `DONE`: record the result in the work list, and release the worker.
 
 With several free workers, send a task to each, then wait for each in turn.
 
