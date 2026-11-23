@@ -260,6 +260,7 @@ bridge names it with `add_target`. Messages to that session keep its mode. Two w
   the new session:
 
   ```sh
+  mkdir -p ~/.claude/skills
   ln -s "$PWD/skills/devin-free-session" ~/.claude/skills/devin-free-session
   ```
 
