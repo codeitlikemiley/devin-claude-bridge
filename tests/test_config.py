@@ -270,3 +270,14 @@ def test_send_limit_from_environment(monkeypatch):
     monkeypatch.setenv("DEVIN_BRIDGE_MAX_SENDS_PER_HOUR", "-5")
     with pytest.raises(ValueError, match="whole number"):
         load_config()
+
+
+def test_create_is_off_unless_allowed(monkeypatch):
+    monkeypatch.setenv("DEVIN_API_KEY", "secret")
+    monkeypatch.setenv("DEVIN_ORG_ID", "org-one")
+    assert load_config().allow_create is False
+    monkeypatch.setenv("DEVIN_BRIDGE_ALLOW_CREATE", "1")
+    assert load_config().allow_create is True
+    monkeypatch.setenv("DEVIN_BRIDGE_ALLOW_CREATE", "yes")
+    with pytest.raises(ValueError, match="0 or 1"):
+        load_config()

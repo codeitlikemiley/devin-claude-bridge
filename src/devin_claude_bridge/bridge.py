@@ -38,6 +38,8 @@ def _brief(account, session, aliases=()):
         "is_archived": session.get("is_archived") is True,
         "updated_at": updated,
         "url": session.get("url"),
+        # Empty for Free (SWE-2) sessions and agent previews, which have no API mode.
+        "devin_mode": session.get("devin_mode"),
     }
     if isinstance(updated, (int, float)):
         stamp = datetime.fromtimestamp(updated, timezone.utc)
@@ -54,6 +56,9 @@ class Bridge:
         self.config = config
         self.state = state or State()
         self.store = targets or TargetStore(store_path(self.state.path))
+        # Send times live apart from the inbox watches, so unwatching a session
+        # does not clear its count.
+        self.sends = State(self.state.path.with_name(self.state.path.name + ".sends.json"))
         self.file_targets = dict(config.targets)
         self.clients = {name: client_factory(a) for name, a in config.accounts.items()}
 
@@ -466,8 +471,14 @@ class Bridge:
         tags: list[str] | None = None,
         playbook_id: str | None = None,
         secret_ids: list[str] | None = None,
+        devin_mode: str | None = None,
     ):
-        """Create and automatically watch a new Devin session.
+        """Create and automatically watch a new Devin session. It may be billed.
+
+        Off unless DEVIN_BRIDGE_ALLOW_CREATE=1, and `devin_mode` is required:
+        "normal", "fast", "fusion", "lite", "ultra" or "fast-ultra". The API has
+        no value for the web app's Free (SWE-2) option, so a Free session must be
+        started in the Devin web app and named here with add_target.
 
         With `alias`, the new session also becomes that target, and an existing
         alias of that name moves to it. `platform` picks the machine: "linux",
@@ -477,6 +488,19 @@ class Bridge:
         names secrets that already exist in that account.
         """
         self._refresh()
+        if not self.config.allow_create:
+            raise ValueError(
+                "create_session is off. A session it starts uses a billed mode: the "
+                "API cannot select the web app's Free (SWE-2) option. Start a Free "
+                "session in the Devin web app and name it with add_target, or set "
+                "DEVIN_BRIDGE_ALLOW_CREATE=1 to allow billed sessions."
+            )
+        if not devin_mode:
+            raise ValueError(
+                "Name the devin_mode for the new session (it decides the cost): normal, "
+                "fast, fusion, lite, ultra or fast-ultra. Without it Devin uses the "
+                "organization's default mode. Nothing was created."
+            )
         if alias is not None:
             self._check_alias(alias)
         result = await self.client(account).create_session(
@@ -487,6 +511,7 @@ class Bridge:
             tags=tags,
             playbook_id=playbook_id,
             secret_ids=secret_ids,
+            devin_mode=devin_mode,
         )
         await self.watch_session(account=account, session_id=result["session_id"])
         if alias is None:
@@ -569,7 +594,7 @@ class Bridge:
                 target,
                 account,
                 session_id,
-                lambda name, sid: self._send(data, name, sid, message),
+                lambda name, sid: self._send(name, sid, message),
             )
             position = data.setdefault(account, {}).setdefault(
                 sid, {"cursor": None, "event_id": None}
@@ -580,28 +605,39 @@ class Bridge:
                 position["direct"] = True
         return result
 
-    async def _send(self, data, account, sid, message):
+    async def _send(self, account, sid, message):
         """Send one message, unless this session already got the hourly maximum.
 
         Two agents that answer each other can exchange messages without end. The
-        limit stops that loop. Send times are kept in the state file, so a restart
-        does not clear them.
+        limit stops that loop. Send times are kept in their own state file, so a
+        restart or an unwatch does not clear them.
         """
         limit = self.config.max_sends_per_hour
-        position = data.setdefault(account, {}).setdefault(sid, {"cursor": None, "event_id": None})
-        now = time.time()
-        recent = [t for t in position.get("sent_at", []) if now - t < 3600]
-        if limit and len(recent) >= limit:
-            wait = max(1, -(-int(3600 - (now - min(recent))) // 60))
-            raise ValueError(
-                f"Session {sid} on account {account} got {len(recent)} messages from this "
-                f"bridge in the last hour, the maximum. Nothing was sent. If two agents "
-                f"answer each other in a loop, stop the loop. Otherwise try again in "
-                f"{wait} minutes, or raise DEVIN_BRIDGE_MAX_SENDS_PER_HOUR (0 is no limit)."
-            )
-        result = await self.client(account).send_message(sid, message)
-        position["sent_at"] = [*recent, now]
-        return result
+        async with self.sends.transaction() as sends:
+            now = time.time()
+            for name in list(sends):
+                for key in list(sends[name]):
+                    kept = [t for t in sends[name][key].get("sent_at", []) if now - t < 3600]
+                    if kept:
+                        sends[name][key]["sent_at"] = kept
+                    else:
+                        del sends[name][key]
+                if not sends[name]:
+                    del sends[name]
+            entry = sends.setdefault(account, {}).setdefault(sid, {"sent_at": []})
+            recent = entry["sent_at"]
+            if limit and len(recent) >= limit:
+                wait = max(1, -(-int(3600 - (now - min(recent))) // 60))
+                raise ValueError(
+                    f"Session {sid} on account {account} got {len(recent)} messages from "
+                    f"this bridge in the last hour, the maximum. Nothing was sent. If two "
+                    f"agents answer each other in a loop, stop the loop. Otherwise try "
+                    f"again in {wait} minutes, or raise DEVIN_BRIDGE_MAX_SENDS_PER_HOUR "
+                    f"(0 is no limit)."
+                )
+            result = await self.client(account).send_message(sid, message)
+            recent.append(now)
+            return result
 
     async def _read(self, data, account, sid, only_new=True, include_user=False):
         position = data.setdefault(account, {}).setdefault(

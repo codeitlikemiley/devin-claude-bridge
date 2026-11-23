@@ -346,21 +346,31 @@ async def test_remove_target(bridge, orgs):
 
 async def test_create_session_with_alias(tmp_path, orgs):
     bridge = make(tmp_path, orgs, {"filed": {"account": "work", "session_id": "devin-a"}})
+    bridge.config.allow_create = True
     with pytest.raises(ValueError, match="defined in config.toml"):
-        await bridge.create_session("work", "do it", alias="filed")
+        await bridge.create_session("work", "do it", alias="filed", devin_mode="lite")
     assert orgs["work"].sessions == {}
-    created = await bridge.create_session("work", "do it", title="Task", alias="work")
+    created = await bridge.create_session(
+        "work", "do it", title="Task", alias="work", devin_mode="lite"
+    )
     assert created["target"] == "work"
     await bridge.send_message("more", target="work")
     assert orgs["work"].sent == [(created["session_id"], "more")]
-    second = await bridge.create_session("work", "next", alias="work")
+    second = await bridge.create_session("work", "next", alias="work", devin_mode="lite")
     assert second["replaced"]["session_id"] == created["session_id"]
     assert bridge.list_accounts()["targets"]["work"]["session_id"] == second["session_id"]
 
 
 async def test_create_session_passes_machine_and_options(bridge, orgs):
+    bridge.config.allow_create = True
     await bridge.create_session(
-        "work", "build it", platform="windows", repos=["org/app"], tags=["ws1"], alias="win"
+        "work",
+        "build it",
+        platform="windows",
+        repos=["org/app"],
+        tags=["ws1"],
+        alias="win",
+        devin_mode="lite",
     )
     assert orgs["work"].created == [
         {
@@ -371,8 +381,31 @@ async def test_create_session_passes_machine_and_options(bridge, orgs):
             "tags": ["ws1"],
             "playbook_id": None,
             "secret_ids": None,
+            "devin_mode": "lite",
         }
     ]
+
+
+async def test_create_session_is_off_and_needs_a_mode(bridge, orgs):
+    with pytest.raises(ValueError, match="create_session is off.*Free"):
+        await bridge.create_session("work", "build it", devin_mode="lite")
+    bridge.config.allow_create = True
+    with pytest.raises(ValueError, match="Name the devin_mode.*Nothing was created"):
+        await bridge.create_session("work", "build it")
+    assert orgs["work"].created == []
+    assert bridge.list_accounts()["targets"] == {}
+
+
+async def test_unwatching_keeps_the_send_count(bridge, orgs):
+    orgs["work"].add("a")
+    bridge.config.max_sends_per_hour = 1
+    await bridge.add_target("worker", "a")
+    await bridge.send_message("one", target="worker")
+    await bridge.remove_target("worker")
+    await bridge.unwatch_session(account="work", session_id="a")
+    with pytest.raises(ValueError, match="maximum"):
+        await bridge.send_message("two", account="work", session_id="a")
+    assert [m for _, m in orgs["work"].sent] == ["one"]
 
 
 async def test_send_limit_stops_a_loop(tmp_path, orgs, monkeypatch):
@@ -420,7 +453,7 @@ async def test_failed_send_is_not_counted(tmp_path, orgs):
 
 
 async def test_list_sessions_across_accounts(bridge, orgs):
-    orgs["work"].add("a", updated_at=10)
+    orgs["work"].add("a", updated_at=10, devin_mode="lite")
     orgs["work"].add("archived", is_archived=True, updated_at=50)
     orgs["work"].add("done", status="exit", updated_at=40)
     orgs["hexuria"].add("b", updated_at=30, status="suspended", status_detail="inactivity")
@@ -437,6 +470,8 @@ async def test_list_sessions_across_accounts(bridge, orgs):
     assert listed["sessions"][0]["targets"] == ["hexuria"]
     assert listed["sessions"][0]["status_detail"] == "inactivity"
     assert listed["sessions"][0]["updated"] == "1970-01-01 00:00 UTC"
+    modes = {s["title"]: s["devin_mode"] for s in listed["sessions"]}
+    assert modes["A"] == "lite" and modes["B"] is None
     everything = await bridge.list_sessions(account="work", active_only=False, limit=2)
     assert [s["title"] for s in everything["sessions"]] == ["Archived", "Done"]
     orgs["work"].down = True
