@@ -259,3 +259,14 @@ def test_api_key_command_config_errors(monkeypatch, tmp_path):
 def test_invalid_session(sid):
     with pytest.raises(ValueError, match="Invalid session"):
         session_id(sid)
+
+
+def test_send_limit_from_environment(monkeypatch):
+    monkeypatch.setenv("DEVIN_API_KEY", "secret")
+    monkeypatch.setenv("DEVIN_ORG_ID", "org-one")
+    assert load_config().max_sends_per_hour == 30
+    monkeypatch.setenv("DEVIN_BRIDGE_MAX_SENDS_PER_HOUR", "0")
+    assert load_config().max_sends_per_hour == 0
+    monkeypatch.setenv("DEVIN_BRIDGE_MAX_SENDS_PER_HOUR", "-5")
+    with pytest.raises(ValueError, match="whole number"):
+        load_config()

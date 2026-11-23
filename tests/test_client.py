@@ -37,6 +37,12 @@ async def test_calls_and_pagination():
     assert json.loads(requests[-1].content) == {"prompt": "hello", "title": "Title"}
     await client.create_session("hello")
     assert json.loads(requests[-1].content) == {"prompt": "hello"}
+    await client.create_session("hello", platform="macos", repos=["org/app"], tags=None)
+    assert json.loads(requests[-1].content) == {
+        "prompt": "hello",
+        "platform": "macos",
+        "repos": ["org/app"],
+    }
     await client.get_session("abc")
     assert requests[-1].url.path.endswith("/devin-abc")
     await client.send_message("devin-abc", "followup")

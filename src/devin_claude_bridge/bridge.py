@@ -456,17 +456,38 @@ class Bridge:
         return name, sid, await run(name, sid)
 
     async def create_session(
-        self, account: str, prompt: str, title: str | None = None, alias: str | None = None
+        self,
+        account: str,
+        prompt: str,
+        title: str | None = None,
+        alias: str | None = None,
+        platform: str | None = None,
+        repos: list[str] | None = None,
+        tags: list[str] | None = None,
+        playbook_id: str | None = None,
+        secret_ids: list[str] | None = None,
     ):
         """Create and automatically watch a new Devin session.
 
         With `alias`, the new session also becomes that target, and an existing
-        alias of that name moves to it.
+        alias of that name moves to it. `platform` picks the machine: "linux",
+        "macos" or "windows" (an unknown value is refused with the list the
+        account accepts); without it the account's default is used. `repos`,
+        `tags`, `playbook_id` and `secret_ids` go to Devin unchanged; `secret_ids`
+        names secrets that already exist in that account.
         """
         self._refresh()
         if alias is not None:
             self._check_alias(alias)
-        result = await self.client(account).create_session(prompt, title)
+        result = await self.client(account).create_session(
+            prompt,
+            title,
+            platform=platform,
+            repos=repos,
+            tags=tags,
+            playbook_id=playbook_id,
+            secret_ids=secret_ids,
+        )
         await self.watch_session(account=account, session_id=result["session_id"])
         if alias is None:
             return result
@@ -531,7 +552,9 @@ class Bridge:
         """Send to a target alias OR an account/session pair; automatically watch it.
 
         Nothing is sent to a session that is archived or has ended; the error then
-        lists the account's active sessions. A suspended session is resumed.
+        lists the account's active sessions. A suspended session is resumed. Nothing
+        is sent to a session that already got the hourly maximum of messages from
+        this bridge (DEVIN_BRIDGE_MAX_SENDS_PER_HOUR, 30 by default).
         """
         self._refresh()
         if not self._bot(target):
@@ -546,7 +569,7 @@ class Bridge:
                 target,
                 account,
                 session_id,
-                lambda name, sid: self.client(name).send_message(sid, message),
+                lambda name, sid: self._send(data, name, sid, message),
             )
             position = data.setdefault(account, {}).setdefault(
                 sid, {"cursor": None, "event_id": None}
@@ -555,6 +578,29 @@ class Bridge:
             position["answered"] = False
             if not self.config.targets.get(target, {}).get("bot_service_user_id"):
                 position["direct"] = True
+        return result
+
+    async def _send(self, data, account, sid, message):
+        """Send one message, unless this session already got the hourly maximum.
+
+        Two agents that answer each other can exchange messages without end. The
+        limit stops that loop. Send times are kept in the state file, so a restart
+        does not clear them.
+        """
+        limit = self.config.max_sends_per_hour
+        position = data.setdefault(account, {}).setdefault(sid, {"cursor": None, "event_id": None})
+        now = time.time()
+        recent = [t for t in position.get("sent_at", []) if now - t < 3600]
+        if limit and len(recent) >= limit:
+            wait = max(1, -(-int(3600 - (now - min(recent))) // 60))
+            raise ValueError(
+                f"Session {sid} on account {account} got {len(recent)} messages from this "
+                f"bridge in the last hour, the maximum. Nothing was sent. If two agents "
+                f"answer each other in a loop, stop the loop. Otherwise try again in "
+                f"{wait} minutes, or raise DEVIN_BRIDGE_MAX_SENDS_PER_HOUR (0 is no limit)."
+            )
+        result = await self.client(account).send_message(sid, message)
+        position["sent_at"] = [*recent, now]
         return result
 
     async def _read(self, data, account, sid, only_new=True, include_user=False):

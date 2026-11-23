@@ -12,6 +12,7 @@ class Org:
     def __init__(self):
         self.sessions = {}
         self.sent = []
+        self.created = []
         self.calls = []
         self.down = False
         self.status_gone = set()
@@ -85,7 +86,8 @@ class Org:
         )
         return {k: v for k, v in self._get(sid).items() if k != "messages"}
 
-    async def create_session(self, prompt, title=None):
+    async def create_session(self, prompt, title=None, **options):
+        self.created.append({"prompt": prompt, "title": title, **options})
         return {k: v for k, v in self.add(f"new{len(self.sessions)}", title=title).items()}
 
 

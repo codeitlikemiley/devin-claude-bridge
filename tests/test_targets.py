@@ -358,6 +358,67 @@ async def test_create_session_with_alias(tmp_path, orgs):
     assert bridge.list_accounts()["targets"]["work"]["session_id"] == second["session_id"]
 
 
+async def test_create_session_passes_machine_and_options(bridge, orgs):
+    await bridge.create_session(
+        "work", "build it", platform="windows", repos=["org/app"], tags=["ws1"], alias="win"
+    )
+    assert orgs["work"].created == [
+        {
+            "prompt": "build it",
+            "title": None,
+            "platform": "windows",
+            "repos": ["org/app"],
+            "tags": ["ws1"],
+            "playbook_id": None,
+            "secret_ids": None,
+        }
+    ]
+
+
+async def test_send_limit_stops_a_loop(tmp_path, orgs, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr("devin_claude_bridge.bridge.time.time", lambda: clock[0])
+    orgs["work"].add("a")
+    bridge = make(tmp_path, orgs)
+    bridge.config.max_sends_per_hour = 2
+    await bridge.send_message("one", account="work", session_id="a")
+    await bridge.send_message("two", account="work", session_id="a")
+    with pytest.raises(ValueError, match="maximum. Nothing was sent.*try again in 60 minutes"):
+        await bridge.send_message("three", account="work", session_id="a")
+    assert [m for _, m in orgs["work"].sent] == ["one", "two"]
+    # The count is in the state file, so a new bridge process refuses too.
+    restarted = make(tmp_path, orgs)
+    restarted.config.max_sends_per_hour = 2
+    with pytest.raises(ValueError, match="maximum"):
+        await restarted.send_message("three", account="work", session_id="a")
+    # Another session has its own count.
+    orgs["work"].add("b")
+    await restarted.send_message("hi", account="work", session_id="b")
+    clock[0] += 3600
+    await restarted.send_message("three", account="work", session_id="a")
+    restarted.config.max_sends_per_hour = 0
+    for text in ("four", "five", "six"):
+        await restarted.send_message(text, account="work", session_id="a")
+    assert [m for _, m in orgs["work"].sent][-5:] == ["hi", "three", "four", "five", "six"]
+
+
+async def test_failed_send_is_not_counted(tmp_path, orgs):
+    orgs["work"].add("a")
+    bridge = make(tmp_path, orgs)
+    bridge.config.max_sends_per_hour = 1
+    send = orgs["work"].send_message
+
+    async def refused(sid, message):
+        raise DevinAPIError(409, "Devin API 409: Session conflict")
+
+    orgs["work"].send_message = refused
+    with pytest.raises(ValueError, match="409"):
+        await bridge.send_message("lost", account="work", session_id="a")
+    orgs["work"].send_message = send
+    await bridge.send_message("kept", account="work", session_id="a")
+    assert [m for _, m in orgs["work"].sent] == ["kept"]
+
+
 async def test_list_sessions_across_accounts(bridge, orgs):
     orgs["work"].add("a", updated_at=10)
     orgs["work"].add("archived", is_archived=True, updated_at=50)

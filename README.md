@@ -266,10 +266,10 @@ The alias already identifies its account; tool calls use either `target` OR
 | `list_accounts()` | Names, org IDs, and targets; never keys |
 | `list_bots(account)` | Root conversations grouped by service user; newest session ID, title and status per Bot |
 | `list_sessions(account?, active_only=true, limit=20)` | Recent sessions in every account or one, newest activity first: title, status, URL, the targets pinned to each, and `child_of` for a session another session started. Active means not archived and not ended; `limit` is per account |
-| `create_session(account, prompt, title?, alias?)` | Creates and watches; returns the API session object. With `alias`, the new session becomes that target |
+| `create_session(account, prompt, title?, alias?, platform?, repos?, tags?, playbook_id?, secret_ids?)` | Creates and watches; returns the API session object. With `alias`, the new session becomes that target. `platform` picks the machine (`linux`, `macos` or `windows`); an unknown value is refused with the list the account accepts. The other options go to Devin unchanged |
 | `add_target(alias, session, account?, description?)` | Names one session, from its Devin URL or ID. Finds the account, refuses an archived or ended session, watches it from now |
 | `remove_target(alias, unwatch=true)` | Forgets an alias made with `add_target` |
-| `send_message(message, target? / account+session_id)` | Sends and watches; returns the updated API session object. Refuses an archived or ended session |
+| `send_message(message, target? / account+session_id)` | Sends and watches; returns the updated API session object. Refuses an archived or ended session, and refuses after 30 messages to one session in an hour (see [the send limit](#the-send-limit)) |
 | `read_messages(target? / account+session_id, only_new=true, include_user=false)` | Reads every page, returns messages, and advances the shared last-seen position |
 | `wait_for_reply(target? / account+session_id, timeout_seconds=300, poll_seconds=15, until_idle=false)` | Waits for Devin's reply and returns it with the session's `status` and `status_detail`. Unread replies from before the call count, and nothing is discarded. `until_idle` waits until Devin stops working |
 | `check_inbox(account?)` | New Devin messages across all watched sessions, grouped by account/session, plus a one-time notice for each watched session that was archived, has ended or is gone |
@@ -467,6 +467,58 @@ the CLI exit nonzero.
 sending may auto-resume a suspended session, but blocked/terminated sessions can
 still return errors. This bridge does not automatically retry sends or creations
 because those operations are not idempotent.
+
+## One Devin driving other Devins
+
+The same server runs inside a Devin session. A *controller* session in one account
+then creates, messages and waits for *worker* sessions in other accounts, with the
+tools in the table above.
+
+```
+controller account                     worker account "a"
+  session ── bridge (MCP) ── API key ──►  macos, windows, linux, linux sessions
+```
+
+Set it up once in the controller account:
+
+1. **Settings → Secrets:** add a pair for each worker account, named the way the
+   bridge reads them: `DEVIN_API_KEY_A` with `DEVIN_ORG_ID_A`, `DEVIN_API_KEY_B`
+   with `DEVIN_ORG_ID_B`, and so on. Get each key and org ID as in
+   [step 1](#1-get-a-devin-api-key-and-organization-id), from the worker account.
+2. **Settings → MCP → Add custom MCP** (organization), with transport **STDIO**:
+   * Command: `uvx`
+   * Arguments: `--from git+https://github.com/codeitlikemiley/devin-claude-bridge devin-claude-bridge`
+     (add `@<commit>` after the URL to pin a version)
+   * Environment variables: each pair from step 1, with its value referring to the
+     secret of the same name, such as `$DEVIN_API_KEY_A`.
+3. **Check it:** start a new session in the controller account and ask it to call
+   `list_accounts`. Each worker account must be listed. If a key did not arrive,
+   the error names the missing variable.
+
+Devin's docs do not show how an MCP environment variable refers to a secret, so
+check step 3 before you depend on it. If `uvx` is not on the machine, install
+`uv` in the machine setup.
+
+A controller starts a worker on the machine it needs, and gives it an alias:
+
+```
+create_session(account="a", prompt="…", platform="macos", alias="a-mac")
+send_message("…", target="a-mac")
+wait_for_reply(target="a-mac", until_idle=true, timeout_seconds=1800)
+```
+
+Aliases and read positions live on the controller's machine, in the state file. A
+new controller session starts without them; it can find the workers again with
+`list_sessions(account="a")` and `add_target`. Keep the list of work outside the
+sessions, for example in GitHub issues, so a new controller can continue it.
+
+### The send limit
+
+Two agents that answer each other can exchange messages without end. The bridge
+refuses to send more than 30 messages to one session in an hour, and nothing is
+sent when it refuses. The count is kept in the state file, so it survives a
+restart. Set `DEVIN_BRIDGE_MAX_SENDS_PER_HOUR` to change the limit; `0` turns it
+off.
 
 ## Development
 
