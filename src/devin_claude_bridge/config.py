@@ -39,6 +39,18 @@ def allow_create() -> bool:
     return raw == "1"
 
 
+def require_holder() -> bool:
+    """Whether send_message refuses a call that does not name its holder and kind.
+
+    Off for now: Claude sessions started before the fleet tools existed hold the
+    old tool schema and cannot pass the new parameters.
+    """
+    raw = os.getenv("DEVIN_BRIDGE_REQUIRE_HOLDER", "").strip()
+    if raw not in {"", "0", "1"}:
+        raise ValueError(f"DEVIN_BRIDGE_REQUIRE_HOLDER must be 0 or 1, not {raw!r}")
+    return raw == "1"
+
+
 @dataclass
 class Account:
     org_id: str
@@ -54,6 +66,8 @@ class Config:
     max_sends_per_hour: int = DEFAULT_MAX_SENDS_PER_HOUR
     # Whether create_session may start sessions; DEVIN_BRIDGE_ALLOW_CREATE=1 turns it on.
     allow_create: bool = False
+    # Whether sends must name holder and kind; DEVIN_BRIDGE_REQUIRE_HOLDER=1 turns it on.
+    require_holder: bool = False
 
     def resolve(self, target=None, account=None, session=None):
         if target:
@@ -217,4 +231,4 @@ def load_config() -> Config:
             ),
             "description": entry.get("description", ""),
         }
-    return Config(accounts, targets, max_sends_per_hour(), allow_create())
+    return Config(accounts, targets, max_sends_per_hour(), allow_create(), require_holder())

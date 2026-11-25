@@ -33,6 +33,7 @@ def bridge(tmp_path):
     bridge.clients["one"].root_sessions.return_value = [root("old")]
     bridge.clients["one"].get_session.return_value = root("old")
     bridge.clients["one"].messages.return_value = ([], None)
+    bridge.clients["one"].send_message.return_value = {}
     bridge.clients["one"].sessions_by_id.side_effect = lambda sids: {
         sid: root(sid.removeprefix("devin-")) for sid in sids
     }
@@ -108,7 +109,8 @@ async def test_retry_failed_send_and_follow_inbox(bridge, status):
     await bridge.watch_session(target="bot")
     client.root_sessions.return_value = [root("new", 2)]
     client.send_message.side_effect = [DevinAPIError(status, "old gone"), {"session_id": "new"}]
-    assert await bridge.send_message("hello", target="bot") == {"session_id": "new"}
+    sent = await bridge.send_message("hello", target="bot")
+    assert sent["session_id"] == "new" and "holder" in sent["warning"]
     assert [c.args[0] for c in client.send_message.await_args_list] == ["devin-old", "devin-new"]
     client.messages.return_value = ([{"event_id": "reply", "source": "devin"}], "cursor-new")
     inbox = await bridge.check_inbox()
