@@ -282,15 +282,20 @@ The alias already identifies its account; tool calls use either `target` OR
 | `list_accounts()` | Names, org IDs, and targets; never keys |
 | `list_bots(account)` | Root conversations grouped by service user; newest session ID, title and status per Bot |
 | `list_sessions(account?, active_only=true, limit=20)` | Recent sessions in every account or one, newest activity first: title, status, `devin_mode`, URL, the targets pinned to each, and `child_of` for a session another session started. Active means not archived and not ended; `limit` is per account |
-| `create_session(account, prompt, devin_mode, title?, alias?, platform?, repos?, tags?, playbook_id?, secret_ids?)` | **Billed, and off by default** (see [Free sessions and billing](#free-sessions-and-billing)). Creates and watches; returns the API session object. With `alias`, the new session becomes that target. `platform` picks the machine (`linux`, `macos` or `windows`); an unknown value is refused with the list the account accepts. The other options go to Devin unchanged |
+| `create_session(account, prompt, devin_mode, title?, alias?, platform?, repos?, tags?, playbook_id?, secret_ids?, pool?, holder?)` | **Billed, and off by default** (see [Free sessions and billing](#free-sessions-and-billing)). Creates and watches; returns the API session object. With `alias`, the new session becomes that target and a fleet machine, held by `holder` (see [Sharing machines](#sharing-machines-between-claude-sessions)); `pool="neon"` is refused off Linux and beyond four. `platform` picks the machine (`linux`, `macos` or `windows`); an unknown value is refused with the list the account accepts. The other options go to Devin unchanged |
 | `add_target(alias, session, account?, description?)` | Names one session, from its Devin URL or ID. Finds the account, refuses an archived or ended session, watches it from now |
 | `remove_target(alias, unwatch=true)` | Forgets an alias made with `add_target` |
-| `send_message(message, target? / account+session_id)` | Sends and watches; returns the updated API session object. Refuses an archived or ended session, and refuses after 30 messages to one session in an hour (see [the send limit](#the-send-limit)) |
+| `send_message(message, target? / account+session_id, holder?, kind?)` | Sends and watches; returns the updated API session object. Refuses an archived or ended session, refuses after 30 messages to one session in an hour (see [the send limit](#the-send-limit)), and refuses a message the [machine rule](#sharing-machines-between-claude-sessions) does not allow |
 | `read_messages(target? / account+session_id, only_new=true, include_user=false)` | Reads every page, returns messages, and advances the shared last-seen position |
 | `wait_for_reply(target? / account+session_id, timeout_seconds=300, poll_seconds=15, until_idle=false)` | Waits for Devin's reply and returns it with the session's `status` and `status_detail`. Unread replies from before the call count, and nothing is discarded. `until_idle` waits until Devin stops working |
 | `check_inbox(account?)` | New Devin messages across all watched sessions, grouped by account/session, plus a one-time notice for each watched session that was archived, has ended or is gone |
 | `watch_session(target? / account+session_id)` | Starts watching without changing an existing cursor |
 | `unwatch_session(target? / account+session_id)` | Stops watching and forgets the cursor |
+| `fleet(need?, free_only=false)` | One line per machine: kind, Devin's status, free or busy, holder, minutes held, task; then the line of waiting tickets |
+| `claim(target, holder, task, follow_up=false, started=false)` | Holds a free machine for a new task |
+| `release(target, holder)` | Frees a machine you hold; names the next ticket in line for its kind |
+| `queue(need, holder, task)` / `unqueue(ticket, holder)` | Waits in line for a machine of a kind, or leaves the line |
+| `describe_target(target, platform, pool, extras="")` | Records a machine's platform and pool (`neon` or `free`) |
 
 ### Aliases for sessions
 
@@ -543,6 +548,69 @@ refuses to send more than 30 messages to one session in an hour, and nothing is
 sent when it refuses. The count is kept in its own file next to the state file
 (`state.json.sends.json`), so a restart or an unwatch does not clear it. Set `DEVIN_BRIDGE_MAX_SENDS_PER_HOUR` to change the limit; `0` turns it
 off.
+
+## Sharing machines between Claude sessions
+
+Several Claude sessions can drive the same Devin machines. Without a record of who
+uses which, one session sends a new task to a machine in the middle of another
+session's work. The bridge keeps that record and enforces one rule:
+
+* A message that **starts work** goes only to a **free** machine.
+* A **busy** machine gets only a **follow-up**, from the session that holds it, on
+  the same piece of work. A different job is a new task, even on a machine you hold.
+* With no free machine of the kind needed, the task **waits in line**; the first in
+  line gets the next machine of that kind that is released.
+
+A machine is every target. It is free when nobody holds it, Devin does not report
+it working (status `running`, `claimed` or `resuming`, other than
+`waiting_for_user`), and its session is not archived or ended. Machines come in
+two kinds: `neon` (Devin with Gemini, Linux only, at most four) for forms work
+that needs reading pictures and video, and the others by platform: `linux`,
+`macos`, `windows`. A machine nobody described is guessed from its name (`neon…`,
+`…macos…`, `…win…`, `…linux…`); `describe_target` sets it.
+
+```
+fleet(need="macos", free_only=true)                          # who is free
+send_message("Run the macOS CI for PR #5 …", target="mac-a",
+             holder="pr-5-session", kind="new")              # claims mac-a, then sends
+wait_for_reply(target="mac-a", until_idle=true)              # hint: release when read
+send_message("Also run shard 2", target="mac-a",
+             holder="pr-5-session", kind="follow_up")
+release(target="mac-a", holder="pr-5-session")
+queue(need="neon", holder="forms-session", task="check the 1701Q print layout")
+```
+
+`holder` is the calling Claude session's name; `kind` is `"new"` or
+`"follow_up"`. A `"new"` message is allowed on a machine the holder claimed just
+before (the first message after `claim`), or on a free machine with nobody ahead
+of the holder in line; the send then claims it, with the message's first line as
+the task. A refusal says who holds the machine and for what, lists the free
+machines of that kind, and says how to queue; nothing is sent. If a send fails,
+the claim it made is undone.
+
+`read_messages` and `wait_for_reply` add a `hint` when a held machine has
+finished or waits for the user: release it once you have read the report. Nothing
+is released by itself.
+
+**Old callers.** A `send_message` without `holder` and `kind` still works, with a
+`warning` that states the rule and says the parameters will become required.
+Set `DEVIN_BRIDGE_REQUIRE_HOLDER=1` to refuse such calls instead. Sessions started
+before this version hold the old tool schema, so leave it off until they are gone.
+
+The record is `fleet.json` in the state file's folder, shared by every bridge
+process under a lock. The same commands work from a shell:
+
+```sh
+devin-claude-bridge fleet                       # the table and the line
+devin-claude-bridge fleet free macos
+devin-claude-bridge fleet claim mac-a my-session "macOS CI for PR #5" [--follow-up|--started]
+devin-claude-bridge fleet release mac-a my-session
+devin-claude-bridge fleet queue neon my-session "check the 1701Q layout"
+devin-claude-bridge fleet unqueue 3 my-session
+devin-claude-bridge fleet set neon-1 linux neon ["extras"]
+```
+
+A refusal exits with status 2 and the reason on stderr.
 
 ## Development
 

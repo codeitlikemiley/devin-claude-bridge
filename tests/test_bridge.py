@@ -24,6 +24,7 @@ def bridge(tmp_path):
     bridge = Bridge(config, State(tmp_path / "state.json"), lambda a: AsyncMock())
     for client in bridge.clients.values():
         client.get_session.return_value = {"status": "running", "is_archived": False}
+        client.send_message.return_value = {}
         client.sessions_by_id.side_effect = lambda sids: {
             sid: {"status": "running", "is_archived": False} for sid in sids
         }
@@ -128,6 +129,12 @@ async def test_tools_registered(bridge):
         "check_inbox",
         "watch_session",
         "unwatch_session",
+        "fleet",
+        "claim",
+        "release",
+        "queue",
+        "unqueue",
+        "describe_target",
     }
     assert logging.getLogger("httpx").level == logging.WARNING
     assert logging.getLogger("mcp.server.lowlevel.server").level == logging.WARNING

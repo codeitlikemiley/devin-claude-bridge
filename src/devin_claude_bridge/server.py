@@ -26,6 +26,12 @@ def create_server(bridge=None):
         "check_inbox",
         "watch_session",
         "unwatch_session",
+        "fleet",
+        "claim",
+        "release",
+        "queue",
+        "unqueue",
+        "describe_target",
     ):
         server.tool()(getattr(bridge, name))
     return server
