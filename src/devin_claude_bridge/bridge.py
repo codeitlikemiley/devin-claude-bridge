@@ -824,9 +824,9 @@ class Bridge:
         """Create and automatically watch a new Devin session. It may be billed.
 
         Off unless DEVIN_BRIDGE_ALLOW_CREATE=1, and `devin_mode` is required:
-        "normal", "fast", "fusion", "lite", "ultra" or "fast-ultra". The API has
-        no value for the web app's Free (SWE-2) option, so a Free session must be
-        started in the Devin web app and named here with add_target.
+        "normal", "fast", "fusion", "lite", "ultra" or "fast-ultra". Devin's API
+        refuses Free (SWE-2) sessions; a person starts those in the Devin web app,
+        and add_target names them here.
 
         With `alias`, the new session also becomes that target, and an existing
         alias of that name moves to it. `platform` picks the machine: "linux",
@@ -844,10 +844,12 @@ class Bridge:
         self._refresh()
         if not self.config.allow_create:
             raise ValueError(
-                "create_session is off. A session it starts uses a billed mode: the "
-                "API cannot select the web app's Free (SWE-2) option. Start a Free "
-                "session in the Devin web app and name it with add_target, or set "
-                "DEVIN_BRIDGE_ALLOW_CREATE=1 to allow billed sessions."
+                "create_session is off. Every session it starts is billed: Devin's "
+                "API refuses Free (SWE-2) sessions, which only a person can start. "
+                "Start a Free session in the Devin web app (or with the "
+                "devin-free-session skill in Claude Code) and name it with "
+                "add_target, or set DEVIN_BRIDGE_ALLOW_CREATE=1 to allow billed "
+                "sessions."
             )
         if not devin_mode:
             raise ValueError(

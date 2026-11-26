@@ -243,13 +243,36 @@ which spends your Devin usage.
 ### Free sessions and billing
 
 `create_session` is off by default, because every session it starts is billed.
-Devin's API has no value for the web app's **Free (powered by SWE-2)** option:
-`devin_mode` accepts only `normal`, `fast`, `fusion`, `lite`, `ultra`,
-`fast-ultra` and some `swe-2-*` values that your plan may not offer. Without a
-mode, Devin uses the organization's default, which is a billed mode.
+Devin's API refuses the web app's **Free (powered by SWE-2)** option: a create
+request with `devin_mode: "free-for-teams"` (the web app's name for it) gets a 403,
+"Free (powered by SWE-2) is only for sessions a person starts from the webapp,
+Slack, Teams, Desktop or the mobile apps." Without a mode, Devin uses the
+organization's default, which is a billed mode.
 
-To keep work Free, start each session in the Devin web app with **Free** picked,
-then name it with `add_target`. Messages to that session keep its mode.
+To keep work Free, a person starts each session with **Free** picked, and the
+bridge names it with `add_target`. Messages to that session keep its mode. Two ways:
+
+* **By hand:** start the session in the Devin web app, then give Claude its URL:
+  “alias https://app.devin.ai/sessions/… as hexuria-mac”.
+* **With the `devin-free-session` skill:** Claude Code starts it for you in your
+  own signed-in Chrome through Claude in Chrome. It picks Free, the machine
+  (Ubuntu, macOS or Windows) and the repositories, sends the prompt, and aliases
+  the new session:
+
+  ```sh
+  mkdir -p ~/.claude/skills
+  ln -s "$PWD/skills/devin-free-session" ~/.claude/skills/devin-free-session
+  ```
+
+  ```
+  /devin-free-session hexuria macos buwiz-app/books alias=hexuria-mac
+  ```
+
+  The skill runs only when you type it, and only on your computer; a Devin
+  session cannot use it. Each Devin account is its own login, so Chrome must be
+  signed in to that account; the skill asks you to sign in or to connect the
+  right Chrome profile. Without a prompt, it sends the
+  [worker prompt](skills/devin-free-session/worker-prompt.md).
 
 To allow billed sessions, set `DEVIN_BRIDGE_ALLOW_CREATE=1`. `create_session`
 then also needs an explicit `devin_mode`, so it never falls back to the default.
@@ -524,10 +547,13 @@ Devin's docs do not show how an MCP environment variable refers to a secret, so
 check step 3 before you depend on it. If `uvx` is not on the machine, install
 `uv` in the machine setup.
 
-Start the workers yourself in each worker account's web app, with **Free** picked
-and the machine you want, so they are not billed (see
-[Free sessions and billing](#free-sessions-and-billing)). Then the controller names
-them and works with them:
+Start the workers in each worker account with **Free** picked and the machine you
+want, by hand or with the `devin-free-session` skill on your computer (see
+[Free sessions and billing](#free-sessions-and-billing)). Give each worker the
+[worker prompt](skills/devin-free-session/worker-prompt.md). Start the controller
+the same way in the controller account, with the
+[controller prompt](prompts/controller.md) filled in. The controller names the
+workers and works with them:
 
 ```
 list_sessions(account="a")
